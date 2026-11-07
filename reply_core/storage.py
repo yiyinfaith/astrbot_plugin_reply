@@ -10,7 +10,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from .models import DEFAULT_SETTINGS, normalize_rule, utc_now
+from .models import DEFAULT_SETTINGS, normalize_folder, normalize_rule, utc_now
 
 
 class ReplyStore:
@@ -27,6 +27,7 @@ class ReplyStore:
     def _empty_state() -> dict[str, Any]:
         return {
             "schema_version": 2,
+            "folders": [],
             "rules": [],
             "settings": deepcopy(DEFAULT_SETTINGS),
             "usage": {},
@@ -47,7 +48,12 @@ class ReplyStore:
             if not isinstance(state, dict):
                 state = self._empty_state()
             state.setdefault("schema_version", 2)
+            state["folders"] = [normalize_folder(item) for item in state.get("folders", []) if isinstance(item, dict)]
+            folder_ids = {folder["id"] for folder in state["folders"]}
             state["rules"] = [normalize_rule(item) for item in state.get("rules", []) if isinstance(item, dict)]
+            for rule in state["rules"]:
+                if rule.get("folder_id") not in folder_ids:
+                    rule["folder_id"] = ""
             settings = state.get("settings") if isinstance(state.get("settings"), dict) else {}
             state["settings"] = {**deepcopy(DEFAULT_SETTINGS), **settings}
             state.setdefault("usage", {})
@@ -79,14 +85,22 @@ class ReplyStore:
         with self._lock:
             return deepcopy(self.state)
 
-    def replace_rules(self, rules: list[dict[str, Any]]) -> None:
+    def replace_rules(self, rules: list[dict[str, Any]], folders: list[dict[str, Any]] | None = None) -> None:
         with self._lock:
+            if folders is not None:
+                self.state["folders"] = [normalize_folder(folder) for folder in folders]
+            folder_ids = {folder["id"] for folder in self.state.get("folders", [])}
             self.state["rules"] = [normalize_rule(rule) for rule in rules]
+            for rule in self.state["rules"]:
+                if rule.get("folder_id") not in folder_ids:
+                    rule["folder_id"] = ""
             self.save()
 
     def upsert_rule(self, rule: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
             normalized = normalize_rule(rule)
+            if normalized.get("folder_id") and normalized["folder_id"] not in {folder["id"] for folder in self.state.get("folders", [])}:
+                raise ValueError("文件夹不存在")
             normalized["updated_at"] = utc_now()
             rows = self.state["rules"]
             for index, existing in enumerate(rows):
@@ -107,6 +121,54 @@ class ReplyStore:
                 return False
             self.save()
             return True
+
+    def list_folders(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return deepcopy(self.state.get("folders", []))
+
+    def upsert_folder(self, folder: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            if not str(folder.get("name") or "").strip():
+                raise ValueError("文件夹名称不能为空")
+            normalized = normalize_folder(folder)
+            rows = self.state.setdefault("folders", [])
+            for index, existing in enumerate(rows):
+                if existing.get("id") == normalized["id"]:
+                    normalized["created_at"] = existing.get("created_at", normalized["created_at"])
+                    rows[index] = normalized
+                    break
+            else:
+                rows.append(normalized)
+            self.save()
+            return deepcopy(normalized)
+
+    def delete_folder(self, folder_id: str) -> bool:
+        with self._lock:
+            folder_id = str(folder_id or "").strip()
+            before = len(self.state.get("folders", []))
+            self.state["folders"] = [folder for folder in self.state.get("folders", []) if folder.get("id") != folder_id]
+            if len(self.state["folders"]) == before:
+                return False
+            for rule in self.state.get("rules", []):
+                if rule.get("folder_id") == folder_id:
+                    rule["folder_id"] = ""
+                    rule["updated_at"] = utc_now()
+            self.save()
+            return True
+
+    def set_rule_folder(self, rule_id: str, folder_id: str = "") -> dict[str, Any] | None:
+        with self._lock:
+            rule_id = str(rule_id or "").strip()
+            folder_id = str(folder_id or "").strip()
+            if folder_id and folder_id not in {folder["id"] for folder in self.state.get("folders", [])}:
+                raise ValueError("文件夹不存在")
+            for rule in self.state.get("rules", []):
+                if rule.get("id") == rule_id:
+                    rule["folder_id"] = folder_id
+                    rule["updated_at"] = utc_now()
+                    self.save()
+                    return deepcopy(rule)
+            return None
 
     def update_settings(self, settings: dict[str, Any]) -> dict[str, Any]:
         with self._lock:

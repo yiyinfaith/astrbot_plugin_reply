@@ -34,7 +34,8 @@ def default_rule(**overrides: Any) -> dict[str, Any]:
     now = utc_now()
     rule: dict[str, Any] = {
         "id": str(uuid4()),
-        "name": "新回复规则",
+        "name": "新自定义回复",
+        "folder_id": "",
         "keywords": [],
         "match_type": "exact",
         "case_sensitive": False,
@@ -82,7 +83,8 @@ def normalize_rule(raw: Any) -> dict[str, Any]:
     source = raw if isinstance(raw, dict) else {}
     base = default_rule() if not isinstance(raw, dict) else deepcopy(raw)
     base["id"] = str(base.get("id") or uuid4())[:80]
-    base["name"] = str(base.get("name") or "未命名规则").strip()[:120]
+    base["name"] = str(base.get("name") or "未命名回复").strip()[:120]
+    base["folder_id"] = str(base.get("folder_id") or "").strip()[:80]
     base["keywords"] = _string_list(base.get("keywords"))[:100]
     base["match_type"] = str(base.get("match_type") or "exact").lower()
     if base["match_type"] not in MATCH_TYPES:
@@ -138,3 +140,18 @@ def normalize_rule(raw: Any) -> dict[str, Any]:
     base["created_at"] = str(base.get("created_at") or utc_now())
     base["updated_at"] = str(base.get("updated_at") or utc_now())
     return base
+
+
+def normalize_folder(raw: Any) -> dict[str, Any]:
+    """Return a safe folder record for categorising custom replies."""
+    source = raw if isinstance(raw, dict) else {}
+    now = utc_now()
+    folder_id = str(source.get("id") or uuid4()).strip()[:80]
+    name = str(source.get("name") or "未命名文件夹").strip()[:80]
+    return {
+        "id": folder_id,
+        "name": name,
+        "description": str(source.get("description") or "").strip()[:300],
+        "created_at": str(source.get("created_at") or now),
+        "updated_at": str(source.get("updated_at") or now),
+    }

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import random
 import tempfile
 import unittest
@@ -10,7 +11,7 @@ from unittest.mock import patch
 from reply_core import webui
 from reply_core.engine import ReplyEngine, render_variables
 from reply_core.matcher import allowed_time, matching_candidates, scope_allowed
-from reply_core.models import default_rule
+from reply_core.models import default_rule, normalize_rule
 from reply_core.storage import ReplyStore
 
 
@@ -72,6 +73,56 @@ class ReplyCoreTests(unittest.TestCase):
             self.assertEqual(getattr(response, "status_code", None), 403)
         with patch.object(webui, "request", SimpleNamespace(username="root")):
             self.assertIsNone(holder._guard())
+
+    def test_folder_crud_move_and_delete_preserves_replies(self):
+        self.assertEqual(normalize_rule({})["folder_id"], "")
+        with tempfile.TemporaryDirectory() as directory:
+            store = ReplyStore(directory)
+            folder = store.upsert_folder({"name": "菜单", "description": "常用菜单"})
+            reply = default_rule(name="帮助", keywords=["help"], content="ok")
+            reply = store.upsert_rule(reply)
+            moved = store.set_rule_folder(reply["id"], folder["id"])
+            self.assertEqual(moved["folder_id"], folder["id"])
+            self.assertEqual(store.list_folders()[0]["name"], "菜单")
+            updated = store.upsert_folder({"id": folder["id"], "name": "菜单回复", "description": "更新"})
+            self.assertEqual(updated["name"], "菜单回复")
+            self.assertTrue(store.delete_folder(folder["id"]))
+            self.assertEqual(store.state["rules"][0]["folder_id"], "")
+            self.assertEqual(store.state["rules"][0]["name"], "帮助")
+
+    def test_folder_webui_api_requires_auth_and_filters(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ReplyStore(directory)
+            engine = ReplyEngine(store)
+            holder = object.__new__(webui.ReplyWebUI)
+            holder.store = store
+            holder.engine = engine
+
+            class Request:
+                username = "root"
+
+                def __init__(self):
+                    self.query = {}
+                    self.payload = {}
+
+                async def json(self, default=None):
+                    return self.payload
+
+            request = Request()
+            with patch.object(webui, "request", request):
+                request.payload = {"name": "菜单"}
+                saved = asyncio.run(holder.save_folder())
+                folder = saved["folder"]
+                reply = default_rule(name="菜单", keywords=["menu"], content="ok", folder_id=folder["id"])
+                store.upsert_rule(reply)
+                request.query = {"folder_id": folder["id"]}
+                listing = asyncio.run(holder.rules())
+                self.assertEqual(listing["total"], 1)
+                request.payload = {"id": folder["id"]}
+                denied_delete = asyncio.run(holder.delete_folder())
+                self.assertEqual(denied_delete.status_code, 400)
+                request.payload = {"id": folder["id"], "confirm": True}
+                self.assertTrue(asyncio.run(holder.delete_folder())["deleted"])
 
 
 if __name__ == "__main__":

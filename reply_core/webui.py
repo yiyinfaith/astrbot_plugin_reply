@@ -25,7 +25,7 @@ except ImportError:  # pragma: no cover - only used outside an AstrBot runtime
     request = SimpleNamespace(username=None, query={}, json=None)
 
 from .engine import ReplyEngine
-from .models import DEFAULT_SETTINGS, normalize_rule, utc_now
+from .models import DEFAULT_SETTINGS, normalize_folder, normalize_rule, utc_now
 
 
 class ReplyWebUI:
@@ -46,6 +46,10 @@ class ReplyWebUI:
             ("rules/delete", self.delete_rule, ["POST"]),
             ("rules/toggle", self.toggle_rule, ["POST"]),
             ("rules/duplicate", self.duplicate_rule, ["POST"]),
+            ("rules/move", self.move_rule, ["POST"]),
+            ("folders", self.folders, ["GET"]),
+            ("folders/save", self.save_folder, ["POST"]),
+            ("folders/delete", self.delete_folder, ["POST"]),
             ("test", self.test_rule, ["POST"]),
             ("export", self.export_rules, ["GET"]),
             ("import", self.import_rules, ["POST"]),
@@ -70,7 +74,7 @@ class ReplyWebUI:
     def _validate_rule(rule: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
         normalized = normalize_rule(rule)
         if not normalized["name"]:
-            return None, "规则名称不能为空"
+            return None, "回复名称不能为空"
         if not normalized["keywords"]:
             return None, "至少填写一个关键词"
         if normalized["reply_type"] == "text" and not normalized["content"]:
@@ -94,6 +98,12 @@ class ReplyWebUI:
                 return None, f"{kind} 组件缺少资源地址或路径"
         return normalized, None
 
+    @staticmethod
+    def _validate_folder(folder: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+        if not str(folder.get("name") or "").strip():
+            return None, "文件夹名称不能为空"
+        return normalize_folder(folder), None
+
     async def overview(self):
         if (failure := self._guard()) is not None:
             return failure
@@ -105,6 +115,7 @@ class ReplyWebUI:
             "enabled": len(enabled),
             "disabled": len(rules) - len(enabled),
             "top_rules": [{"id": row["id"], "name": row["name"], "trigger_count": row.get("stats", {}).get("trigger_count", 0)} for row in top],
+            "folder_total": len(self.store.state.get("folders", [])),
             "settings": deepcopy(self.store.state.get("settings", {})),
         })
 
@@ -115,6 +126,7 @@ class ReplyWebUI:
         search = str(query.get("search", "") or "").casefold()
         match_type = str(query.get("match_type", "") or "").lower()
         group_id = str(query.get("group_id", "") or "").strip()
+        folder_id = str(query.get("folder_id", "") or "").strip()
         enabled = str(query.get("enabled", "") or "").lower()
         try:
             page = max(1, int(query.get("page", 1) or 1))
@@ -134,6 +146,10 @@ class ReplyWebUI:
                 scope = row.get("scope", {})
                 if group_id not in {str(item) for item in scope.get("group_ids", [])}:
                     continue
+            if folder_id == "__none__" and row.get("folder_id"):
+                continue
+            if folder_id and folder_id != "__none__" and row.get("folder_id") != folder_id:
+                continue
             rows.append(deepcopy(row))
         rows.sort(key=lambda row: (-int(row.get("priority", 0)), str(row.get("name", "")).casefold(), row.get("id", "")))
         total = len(rows)
@@ -146,7 +162,7 @@ class ReplyWebUI:
         for row in self.store.state.get("rules", []):
             if row.get("id") == rule_id:
                 return json_response(deepcopy(row))
-        return error_response("未找到规则", status_code=404)
+        return error_response("未找到回复", status_code=404)
 
     async def save_rule(self):
         if (failure := self._guard()) is not None:
@@ -160,9 +176,57 @@ class ReplyWebUI:
         try:
             saved = self.store.upsert_rule(rule)
         except (OSError, ValueError, TypeError) as exc:
-            logger.exception("回复规则保存失败")
-            return error_response(f"保存失败：{exc}", status_code=500)
+            logger.exception("自定义回复保存失败")
+            return error_response(f"保存失败：{exc}", status_code=400 if isinstance(exc, ValueError) else 500)
         return json_response({"saved": True, "rule": saved})
+
+    async def folders(self):
+        if (failure := self._guard()) is not None:
+            return failure
+        return json_response({"rows": self.store.list_folders(), "total": len(self.store.state.get("folders", []))})
+
+    async def save_folder(self):
+        if (failure := self._guard()) is not None:
+            return failure
+        payload = await request.json(default={})
+        if not isinstance(payload, dict):
+            return error_response("请求体必须是 JSON 对象", status_code=400)
+        folder, error = self._validate_folder(payload)
+        if error:
+            return error_response(error, status_code=400)
+        try:
+            saved = self.store.upsert_folder(folder)
+        except (OSError, ValueError, TypeError) as exc:
+            logger.exception("回复文件夹保存失败")
+            return error_response(f"保存失败：{exc}", status_code=500 if not isinstance(exc, ValueError) else 400)
+        return json_response({"saved": True, "folder": saved})
+
+    async def delete_folder(self):
+        if (failure := self._guard()) is not None:
+            return failure
+        payload = await request.json(default={})
+        if not isinstance(payload, dict) or not payload.get("confirm"):
+            return error_response("删除文件夹需要二次确认。", status_code=400)
+        folder_id = str(payload.get("id") or "").strip()
+        if not folder_id:
+            return error_response("缺少文件夹 ID", status_code=400)
+        if not self.store.delete_folder(folder_id):
+            return error_response("未找到文件夹", status_code=404)
+        return json_response({"deleted": True, "id": folder_id})
+
+    async def move_rule(self):
+        if (failure := self._guard()) is not None:
+            return failure
+        payload = await request.json(default={})
+        if not isinstance(payload, dict) or not payload.get("id"):
+            return error_response("需要回复 ID", status_code=400)
+        try:
+            moved = self.store.set_rule_folder(str(payload["id"]), str(payload.get("folder_id") or ""))
+        except ValueError as exc:
+            return error_response(str(exc), status_code=400)
+        if moved is None:
+            return error_response("未找到回复", status_code=404)
+        return json_response({"saved": True, "rule": moved})
 
     async def delete_rule(self):
         if (failure := self._guard()) is not None:
@@ -172,9 +236,9 @@ class ReplyWebUI:
             return error_response("删除操作需要二次确认。", status_code=400)
         rule_id = str(payload.get("id") or "").strip()
         if not rule_id:
-            return error_response("缺少规则 ID", status_code=400)
+            return error_response("缺少回复 ID", status_code=400)
         if not self.store.delete_rule(rule_id):
-            return error_response("未找到规则", status_code=404)
+            return error_response("未找到回复", status_code=404)
         return json_response({"deleted": True, "id": rule_id})
 
     async def toggle_rule(self):
@@ -189,7 +253,7 @@ class ReplyWebUI:
                 row["updated_at"] = utc_now()
                 self.store.save()
                 return json_response({"saved": True, "enabled": row["enabled"]})
-        return error_response("未找到规则", status_code=404)
+        return error_response("未找到回复", status_code=404)
 
     async def duplicate_rule(self):
         if (failure := self._guard()) is not None:
@@ -198,10 +262,10 @@ class ReplyWebUI:
         rule_id = str(payload.get("id") or "") if isinstance(payload, dict) else ""
         source = next((row for row in self.store.state.get("rules", []) if row.get("id") == rule_id), None)
         if source is None:
-            return error_response("未找到规则", status_code=404)
+            return error_response("未找到回复", status_code=404)
         copy = deepcopy(source)
         copy["id"] = str(uuid4())
-        copy["name"] = f"{copy.get('name', '规则')}（副本）"
+        copy["name"] = f"{copy.get('name', '回复')}（副本）"
         copy["stats"] = {"trigger_count": 0, "last_trigger_at": ""}
         copy["created_at"] = copy["updated_at"] = utc_now()
         self.store.upsert_rule(copy)
@@ -222,7 +286,7 @@ class ReplyWebUI:
     async def export_rules(self):
         if (failure := self._guard()) is not None:
             return failure
-        return json_response({"schema_version": 2, "exported_at": utc_now(), "rules": deepcopy(self.store.state.get("rules", [])), "settings": deepcopy(self.store.state.get("settings", {}))})
+        return json_response({"schema_version": 2, "exported_at": utc_now(), "folders": deepcopy(self.store.state.get("folders", [])), "rules": deepcopy(self.store.state.get("rules", [])), "settings": deepcopy(self.store.state.get("settings", {}))})
 
     async def import_rules(self):
         if (failure := self._guard()) is not None:
@@ -238,7 +302,18 @@ class ReplyWebUI:
             if error:
                 return error_response(f"导入失败：{error}", status_code=400)
             validated.append(rule)
-        self.store.replace_rules(validated)
+        folders = payload.get("folders", [])
+        if not isinstance(folders, list):
+            return error_response("folders 必须是数组", status_code=400)
+        normalized_folders = []
+        for raw_folder in folders:
+            if not isinstance(raw_folder, dict):
+                return error_response("folders 中包含无效项目", status_code=400)
+            folder, error = self._validate_folder(raw_folder)
+            if error:
+                return error_response(f"导入失败：{error}", status_code=400)
+            normalized_folders.append(folder)
+        self.store.replace_rules(validated, folders=normalized_folders)
         if isinstance(payload.get("settings"), dict):
             self.store.update_settings(payload["settings"])
         return json_response({"imported": len(validated)})

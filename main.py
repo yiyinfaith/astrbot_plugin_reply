@@ -17,7 +17,7 @@ PLUGIN_NAME = "astrbot_plugin_reply"
 
 @register(
     name="reply",
-    desc="回复管理：关键词匹配、动态回复、作用域、冷却和 WebUI 规则管理。",
+    desc="自定义回复：关键词匹配、动态回复、作用域、冷却和 WebUI 管理。",
     version="v1.0.0",
     author="一吟Faith",
     repo="https://github.com/yiyinfaith/astrbot_plugin_reply",
@@ -34,7 +34,7 @@ class KeywordReplyPlugin(Star):
         self.engine = ReplyEngine(self.store)
         self.webui = ReplyWebUI(context, self.store, self.engine)
         logger.info(
-            "回复管理已加载：%d 条规则（启用 %d 条），数据目录：%s",
+            "回复管理已加载：%d 条回复（启用 %d 条），数据目录：%s",
             len(self.store.state.get("rules", [])),
             sum(1 for rule in self.store.state.get("rules", []) if rule.get("enabled")),
             self.data_dir,
@@ -59,9 +59,9 @@ class KeywordReplyPlugin(Star):
             reply = self.engine.choose_reply(candidate.rule, context)
             chain = self.engine.build_chain(reply)
             if not chain:
-                logger.warning("规则 %s 生成了空消息链，跳过发送", candidate.rule.get("id"))
+                logger.warning("回复 %s 生成了空消息链，跳过发送", candidate.rule.get("id"))
                 return
             self.engine.record_trigger(candidate.rule["id"], user_id=user_id, group_id=group_id)
             yield event.chain_result(chain)
         except (AttributeError, ImportError, IndexError, KeyError, LookupError, OSError, RuntimeError, TypeError, ValueError):
-            logger.exception("回复规则执行失败")
+            logger.exception("自定义回复执行失败")
