@@ -4,7 +4,7 @@ const state = {
   tab: 'overview', overview: null, rules: [], total: 0, page: 1, pageSize: 12,
   folders: [],
   filters: { search: '', match_type: '', enabled: '', group_id: '', folder_id: '' },
-  stats: [], settings: null, draft: null, notice: '', error: '', loading: true,
+  stats: [], settings: null, draft: null, folderDialog: null, notice: '', error: '', loading: true,
 };
 
 const esc = value => String(value ?? '').replace(/[&<>'"]/g, ch => ({
@@ -50,6 +50,15 @@ function folderToolbar() {
   return `<div class="folder-toolbar"><select id="folder_filter" aria-label="文件夹筛选">${folderOptions(state.filters.folder_id, true)}</select><button class="btn" data-action="new-folder">＋ 新建文件夹</button><button class="btn" data-action="edit-folder" ${selectedFolder ? '' : 'disabled'}>编辑文件夹</button><button class="btn danger" data-action="delete-folder" ${selectedFolder ? '' : 'disabled'}>删除文件夹</button></div>`;
 }
 
+function folderDialogView() {
+  const dialog = state.folderDialog;
+  if (!dialog) return '';
+  if (dialog.mode === 'delete') {
+    return `<div class="modal-backdrop" data-folder-dialog-backdrop><section class="modal" role="dialog" aria-modal="true" aria-labelledby="folder-dialog-title"><div class="modal-head"><div><h3 id="folder-dialog-title">删除文件夹</h3><p>文件夹中的回复会保留，并移动到未分类。</p></div><button class="modal-close" type="button" data-action="folder-cancel" aria-label="关闭">×</button></div><div class="modal-warning">确定删除“${esc(dialog.name)}”吗？</div><div class="modal-actions"><button class="btn" type="button" data-action="folder-cancel">取消</button><button class="btn danger" type="button" data-action="folder-submit">删除文件夹</button></div></section></div>`;
+  }
+  return `<div class="modal-backdrop" data-folder-dialog-backdrop><section class="modal" role="dialog" aria-modal="true" aria-labelledby="folder-dialog-title"><div class="modal-head"><div><h3 id="folder-dialog-title">${dialog.id ? '编辑文件夹' : '新建文件夹'}</h3><p>用文件夹整理自定义回复，之后仍可随时移动。</p></div><button class="modal-close" type="button" data-action="folder-cancel" aria-label="关闭">×</button></div><form id="folder-form"><div class="field"><label for="folder_name">文件夹名称</label><input id="folder_name" name="name" maxlength="80" value="${esc(dialog.name)}" placeholder="例如：菜单回复" autofocus></div><div class="field"><label for="folder_description">文件夹说明 <span class="hint">可选</span></label><textarea id="folder_description" name="description" maxlength="300" rows="3" placeholder="例如：常用菜单和帮助回复">${esc(dialog.description)}</textarea></div>${dialog.error ? `<div class="notice error" role="alert">${esc(dialog.error)}</div>` : ''}<div class="modal-actions"><button class="btn" type="button" data-action="folder-cancel">取消</button><button class="btn primary" type="submit">保存文件夹</button></div></form></section></div>`;
+}
+
 function rulesView() {
   const rows = state.rules || [];
   return shell(`<div class="panel"><div class="toolbar"><input class="grow" id="search" value="${esc(state.filters.search)}" placeholder="搜索回复名称或关键词"><select id="match_type" aria-label="匹配方式"><option value="">全部匹配方式</option><option value="exact" ${state.filters.match_type === 'exact' ? 'selected' : ''}>精确</option><option value="contains" ${state.filters.match_type === 'contains' ? 'selected' : ''}>包含</option><option value="prefix" ${state.filters.match_type === 'prefix' ? 'selected' : ''}>前缀</option><option value="regex" ${state.filters.match_type === 'regex' ? 'selected' : ''}>正则</option></select><select id="enabled" aria-label="启用状态"><option value="">全部状态</option><option value="true" ${state.filters.enabled === 'true' ? 'selected' : ''}>已启用</option><option value="false" ${state.filters.enabled === 'false' ? 'selected' : ''}>已禁用</option></select><input id="group_id" value="${esc(state.filters.group_id)}" placeholder="群号筛选"><button class="btn primary" data-action="apply-filter">查询</button><button class="btn" data-nav="create">＋ 新建回复</button></div>${folderToolbar()}<div class="table-wrap"><table class="table"><thead><tr><th>回复</th><th>关键词</th><th>匹配</th><th>文件夹</th><th>作用域</th><th>优先级</th><th>状态</th><th>操作</th></tr></thead><tbody>${rows.length ? rows.map(row => `<tr><td><strong>${esc(row.name)}</strong><br><span class="muted code">${esc(row.id)}</span></td><td>${esc((row.keywords || []).join('、'))}</td><td>${esc(row.match_type)} / ${row.case_sensitive ? '敏感' : '不敏感'}</td><td><select class="folder-select" data-folder-rule="${esc(row.id)}" aria-label="为回复选择文件夹">${folderOptions(row.folder_id || '')}</select></td><td>${esc(row.scope?.mode === 'whitelist' ? '白名单' : '黑名单')}<br><span class="muted">${esc((row.scope?.group_ids || []).length)} 群 / ${esc((row.scope?.user_ids || []).length)} 用户</span></td><td>${esc(row.priority)}</td><td><span class="badge ${row.enabled ? 'good' : 'off'}">${row.enabled ? '启用' : '停用'}</span></td><td><div class="row-actions"><button data-action="edit" data-id="${esc(row.id)}">编辑</button><button data-action="toggle" data-id="${esc(row.id)}">${row.enabled ? '禁用' : '启用'}</button><button data-action="copy" data-id="${esc(row.id)}">复制</button><button class="danger-text" data-action="delete" data-id="${esc(row.id)}">删除</button></div></td></tr>`).join('') : '<tr><td colspan="8" class="empty">没有匹配的回复。</td></tr>'}</tbody></table></div><div class="pagination"><span>共 ${state.total} 条，第 ${state.page} / ${Math.max(1, Math.ceil(state.total / state.pageSize))} 页</span><button class="btn" data-action="prev" ${state.page <= 1 ? 'disabled' : ''}>上一页</button><button class="btn" data-action="next" ${state.page >= Math.ceil(state.total / state.pageSize) ? 'disabled' : ''}>下一页</button></div></div>`, '回复列表', '搜索、筛选、分页管理全部自定义回复。');
@@ -82,7 +91,7 @@ function settingsView() {
 function render() {
   if (state.loading) { app.innerHTML = '<div class="content"><div class="panel empty">正在连接自定义回复插件…</div></div>'; return; }
   const views = { overview: overviewView, rules: rulesView, create: formView, transfer: transferView, stats: statsView, settings: settingsView };
-  app.innerHTML = views[state.tab]();
+  app.innerHTML = views[state.tab]() + folderDialogView();
   bind();
 }
 
@@ -147,21 +156,36 @@ async function testReply() {
   catch (error) { notify(error.message || String(error), true); }
 }
 
-async function saveFolder(existing = null) {
-  const name = window.prompt(existing ? '修改文件夹名称' : '新建文件夹名称', existing?.name || '');
-  if (name === null) return;
-  if (!name.trim()) { notify('文件夹名称不能为空。', true); return; }
-  const description = window.prompt('文件夹说明（可选）', existing?.description || '');
-  if (description === null) return;
-  try { await apiPost('folders/save', { id: existing?.id || '', name: name.trim(), description: description.trim() }); await loadFolders(); await loadRules(); state.overview = await apiGet('overview'); render(); notify('文件夹已保存。'); }
-  catch (error) { notify(error.message || String(error), true); }
+function openFolderDialog(existing = null) {
+  state.folderDialog = { mode: 'edit', id: existing?.id || '', name: existing?.name || '', description: existing?.description || '', error: '' };
+  render();
+  requestAnimationFrame(() => document.getElementById('folder_name')?.focus());
+}
+
+function openDeleteFolderDialog(folder) {
+  if (!folder) return;
+  state.folderDialog = { mode: 'delete', id: folder.id, name: folder.name, description: '' };
+  render();
+}
+
+async function submitFolder() {
+  const dialog = state.folderDialog;
+  if (!dialog) return;
+  if (dialog.mode === 'delete') {
+    try { await apiPost('folders/delete', { id: dialog.id, confirm: true }); state.folderDialog = null; state.filters.folder_id = ''; await loadFolders(); await loadRules(); state.overview = await apiGet('overview'); render(); notify('文件夹已删除，回复已移到未分类。'); }
+    catch (error) { notify(error.message || String(error), true); }
+    return;
+  }
+  const name = document.getElementById('folder_name')?.value.trim() || '';
+  const description = document.getElementById('folder_description')?.value.trim() || '';
+  if (!name) { dialog.error = '文件夹名称不能为空。'; render(); return; }
+  try { await apiPost('folders/save', { id: dialog.id, name, description }); state.folderDialog = null; await loadFolders(); await loadRules(); state.overview = await apiGet('overview'); render(); notify('文件夹已保存。'); }
+  catch (error) { dialog.error = error.message || String(error); render(); }
 }
 
 async function deleteFolder() {
   const folder = state.folders.find(item => item.id === state.filters.folder_id);
-  if (!folder || !window.confirm(`确定删除文件夹“${folder.name}”吗？其中的回复会保留并移到未分类。`)) return;
-  try { await apiPost('folders/delete', { id: folder.id, confirm: true }); state.filters.folder_id = ''; await loadFolders(); await loadRules(); state.overview = await apiGet('overview'); render(); notify('文件夹已删除，回复已移到未分类。'); }
-  catch (error) { notify(error.message || String(error), true); }
+  openDeleteFolderDialog(folder);
 }
 
 async function action(event) {
@@ -172,9 +196,11 @@ async function action(event) {
     if (act === 'apply-filter') { state.filters = { search: document.getElementById('search').value.trim(), match_type: document.getElementById('match_type').value, enabled: document.getElementById('enabled').value, group_id: document.getElementById('group_id').value.trim(), folder_id: document.getElementById('folder_filter').value }; state.page = 1; await loadRules(); render(); return; }
     if (act === 'prev') { state.page--; await loadRules(); render(); return; }
     if (act === 'next') { state.page++; await loadRules(); render(); return; }
-    if (act === 'new-folder') { await saveFolder(); return; }
-    if (act === 'edit-folder') { await saveFolder(state.folders.find(item => item.id === state.filters.folder_id)); return; }
+    if (act === 'new-folder') { openFolderDialog(); return; }
+    if (act === 'edit-folder') { openFolderDialog(state.folders.find(item => item.id === state.filters.folder_id)); return; }
     if (act === 'delete-folder') { await deleteFolder(); return; }
+    if (act === 'folder-cancel') { state.folderDialog = null; render(); return; }
+    if (act === 'folder-submit') { await submitFolder(); return; }
     if (act === 'edit') { state.draft = await apiGet(`rules/${encodeURIComponent(button.dataset.id)}`); state.tab = 'create'; render(); return; }
     if (act === 'toggle') { const row = state.rules.find(item => item.id === button.dataset.id); await apiPost('rules/toggle', { id: button.dataset.id, enabled: !row.enabled }); await loadRules(); render(); return; }
     if (act === 'copy') { const result = await apiPost('rules/duplicate', { id: button.dataset.id }); state.draft = result.rule; state.tab = 'create'; render(); return; }
@@ -191,6 +217,10 @@ async function action(event) {
 function bind() {
   document.querySelectorAll('[data-nav]').forEach(button => button.addEventListener('click', () => switchTab(button.dataset.nav)));
   app.onclick = action;
+  const folderForm = document.getElementById('folder-form');
+  if (folderForm) folderForm.addEventListener('submit', event => { event.preventDefault(); submitFolder(); });
+  const backdrop = document.querySelector('[data-folder-dialog-backdrop]');
+  if (backdrop) backdrop.addEventListener('click', event => { if (event.target === backdrop) { state.folderDialog = null; render(); } });
   document.querySelectorAll('[data-folder-rule]').forEach(select => select.addEventListener('change', async event => { try { await apiPost('rules/move', { id: event.target.dataset.folderRule, folder_id: event.target.value }); await loadRules(); notify(event.target.value ? '回复已移入文件夹。' : '回复已移出文件夹。'); } catch (error) { notify(error.message || String(error), true); } }));
   const input = document.getElementById('import-file');
   if (input) input.addEventListener('change', async () => { const file = input.files[0]; if (!file) return; document.getElementById('import-name').textContent = file.name; if (!window.confirm('导入会替换当前回复和文件夹，确定继续吗？')) return; try { const payload = JSON.parse(await file.text()); const result = await apiPost('import', payload); notify(`已导入 ${result.imported} 条回复。`); await load(); } catch (error) { notify(error.message || String(error), true); } });
