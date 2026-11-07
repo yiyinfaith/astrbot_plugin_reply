@@ -1,7 +1,7 @@
 """Data model and validation helpers for reply rules.
 
-The JSON representation is deliberately plain so it remains easy to export,
-inspect, and migrate without adding a runtime dependency.
+The JSON representation is deliberately plain so it remains easy to export
+and inspect without adding a runtime dependency.
 """
 
 from __future__ import annotations

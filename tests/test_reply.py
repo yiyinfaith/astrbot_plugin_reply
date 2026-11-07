@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import json
 import random
 import tempfile
 import unittest
 from datetime import datetime, timezone
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -61,17 +59,6 @@ class ReplyCoreTests(unittest.TestCase):
             self.assertIsNotNone(engine.select("ping", user_id="u1", now=datetime(2026, 1, 1, 0, 1, 1, tzinfo=timezone.utc)))
             reloaded = ReplyStore(directory)
             self.assertEqual(reloaded.state["rules"][0]["stats"]["trigger_count"], 1)
-
-    def test_legacy_migration_is_idempotent_and_atomic(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "keyword_reply_config.json"
-            path.write_text(json.dumps({"菜单": "帮助内容", "帮助": "请稍候"}, ensure_ascii=False), encoding="utf-8")
-            first = ReplyStore(directory)
-            self.assertEqual(len(first.state["rules"]), 2)
-            self.assertTrue((Path(directory) / "reply_rules.json").is_file())
-            second = ReplyStore(directory)
-            self.assertEqual(len(second.state["rules"]), 2)
-            self.assertTrue((Path(directory) / "migration.json").is_file())
 
     def test_webui_requires_authenticated_admin(self):
         holder = object.__new__(webui.ReplyWebUI)

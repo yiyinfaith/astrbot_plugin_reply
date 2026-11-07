@@ -106,7 +106,6 @@ class ReplyWebUI:
             "disabled": len(rules) - len(enabled),
             "top_rules": [{"id": row["id"], "name": row["name"], "trigger_count": row.get("stats", {}).get("trigger_count", 0)} for row in top],
             "settings": deepcopy(self.store.state.get("settings", {})),
-            "migration": {"migrated_legacy": bool(self.store.state.get("migrated_legacy")), "legacy_present": self.store.legacy_path.is_file()},
         })
 
     async def rules(self):
