@@ -11,10 +11,20 @@ try:  # Keep pure unit tests runnable without installing the full AstrBot extras
     from astrbot.api import logger
     from astrbot.api.web import error_response, json_response, request
 except ImportError:  # pragma: no cover - only used outside an AstrBot runtime
-    import logging
     from types import SimpleNamespace
 
-    logger = logging.getLogger("astrbot_plugin_reply")
+    class _FallbackLogger:
+        """No-op logger used only when pure unit tests run without AstrBot."""
+
+        def debug(self, *args, **kwargs):
+            return None
+
+        info = debug
+        warning = debug
+        error = debug
+        exception = debug
+
+    logger = _FallbackLogger()
 
     def error_response(message, status_code=400):
         return SimpleNamespace(status_code=status_code, message=message)
