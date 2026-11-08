@@ -4,7 +4,7 @@ const state = {
   tab: 'overview', overview: null, rules: [], total: 0, page: 1, pageSize: 12,
   folders: [],
   filters: { search: '', match_type: '', enabled: '', group_id: '', folder_id: '' },
-  stats: [], settings: null, draft: null, folderDialog: null, notice: '', error: '', loading: true,
+  stats: [], settings: null, draft: null, folderDialog: null, confirmDialog: null, pendingImport: null, notice: '', error: '', loading: true, noticeTimer: null,
 };
 
 const esc = value => String(value ?? '').replace(/[&<>'"]/g, ch => ({
@@ -15,10 +15,11 @@ const apiGet = (endpoint, params = {}) => bridge.apiGet(endpoint, params);
 const apiPost = (endpoint, body = {}) => bridge.apiPost(endpoint, body);
 
 function notify(message, error = false) {
+  if (state.noticeTimer) clearTimeout(state.noticeTimer);
   state.notice = error ? '' : message;
   state.error = error ? message : '';
   render();
-  setTimeout(() => { state.notice = ''; state.error = ''; render(); }, 4500);
+  state.noticeTimer = setTimeout(() => { state.notice = ''; state.error = ''; state.noticeTimer = null; render(); }, 4500);
 }
 
 function nav() {
@@ -59,6 +60,12 @@ function folderDialogView() {
   return `<div class="modal-backdrop" data-folder-dialog-backdrop><section class="modal" role="dialog" aria-modal="true" aria-labelledby="folder-dialog-title"><div class="modal-head"><div><h3 id="folder-dialog-title">${dialog.id ? '编辑文件夹' : '新建文件夹'}</h3><p>用文件夹整理自定义回复，之后仍可随时移动。</p></div><button class="modal-close" type="button" data-action="folder-cancel" aria-label="关闭">×</button></div><form id="folder-form"><div class="field"><label for="folder_name">文件夹名称</label><input id="folder_name" name="name" maxlength="80" value="${esc(dialog.name)}" placeholder="例如：菜单回复" autofocus></div><div class="field"><label for="folder_description">文件夹说明 <span class="hint">可选</span></label><textarea id="folder_description" name="description" maxlength="300" rows="3" placeholder="例如：常用菜单和帮助回复">${esc(dialog.description)}</textarea></div>${dialog.error ? `<div class="notice error" role="alert">${esc(dialog.error)}</div>` : ''}<div class="modal-actions"><button class="btn" type="button" data-action="folder-cancel">取消</button><button class="btn primary" type="submit">保存文件夹</button></div></form></section></div>`;
 }
 
+function confirmDialogView() {
+  const dialog = state.confirmDialog;
+  if (!dialog) return '';
+  return `<div class="modal-backdrop" data-confirm-dialog-backdrop><section class="modal" role="dialog" aria-modal="true" aria-labelledby="confirm-dialog-title"><div class="modal-head"><div><h3 id="confirm-dialog-title">${esc(dialog.title)}</h3><p>${esc(dialog.message)}</p></div><button class="modal-close" type="button" data-action="confirm-cancel" aria-label="关闭">×</button></div><div class="modal-actions"><button class="btn" type="button" data-action="confirm-cancel">取消</button><button class="btn danger" type="button" data-action="confirm-submit">${esc(dialog.confirmLabel || '确认')}</button></div></section></div>`;
+}
+
 function rulesView() {
   const rows = state.rules || [];
   return shell(`<div class="panel"><div class="toolbar"><input class="grow" id="search" value="${esc(state.filters.search)}" placeholder="搜索回复名称或关键词"><select id="match_type" aria-label="匹配方式"><option value="">全部匹配方式</option><option value="exact" ${state.filters.match_type === 'exact' ? 'selected' : ''}>精确</option><option value="contains" ${state.filters.match_type === 'contains' ? 'selected' : ''}>包含</option><option value="prefix" ${state.filters.match_type === 'prefix' ? 'selected' : ''}>前缀</option><option value="regex" ${state.filters.match_type === 'regex' ? 'selected' : ''}>正则</option></select><select id="enabled" aria-label="启用状态"><option value="">全部状态</option><option value="true" ${state.filters.enabled === 'true' ? 'selected' : ''}>已启用</option><option value="false" ${state.filters.enabled === 'false' ? 'selected' : ''}>已禁用</option></select><input id="group_id" value="${esc(state.filters.group_id)}" placeholder="群号筛选"><button class="btn primary" data-action="apply-filter">查询</button><button class="btn" data-nav="create">＋ 新建回复</button></div>${folderToolbar()}<div class="table-wrap"><table class="table"><thead><tr><th>回复</th><th>关键词</th><th>匹配</th><th>文件夹</th><th>作用域</th><th>优先级</th><th>状态</th><th>操作</th></tr></thead><tbody>${rows.length ? rows.map(row => `<tr><td><strong>${esc(row.name)}</strong><br><span class="muted code">${esc(row.id)}</span></td><td>${esc((row.keywords || []).join('、'))}</td><td>${esc(row.match_type)} / ${row.case_sensitive ? '敏感' : '不敏感'}</td><td><select class="folder-select" data-folder-rule="${esc(row.id)}" aria-label="为回复选择文件夹">${folderOptions(row.folder_id || '')}</select></td><td>${esc(row.scope?.mode === 'whitelist' ? '白名单' : '黑名单')}<br><span class="muted">${esc((row.scope?.group_ids || []).length)} 群 / ${esc((row.scope?.user_ids || []).length)} 用户</span></td><td>${esc(row.priority)}</td><td><span class="badge ${row.enabled ? 'good' : 'off'}">${row.enabled ? '启用' : '停用'}</span></td><td><div class="row-actions"><button data-action="edit" data-id="${esc(row.id)}">编辑</button><button data-action="toggle" data-id="${esc(row.id)}">${row.enabled ? '禁用' : '启用'}</button><button data-action="copy" data-id="${esc(row.id)}">复制</button><button class="danger-text" data-action="delete" data-id="${esc(row.id)}">删除</button></div></td></tr>`).join('') : '<tr><td colspan="8" class="empty">没有匹配的回复。</td></tr>'}</tbody></table></div><div class="pagination"><span>共 ${state.total} 条，第 ${state.page} / ${Math.max(1, Math.ceil(state.total / state.pageSize))} 页</span><button class="btn" data-action="prev" ${state.page <= 1 ? 'disabled' : ''}>上一页</button><button class="btn" data-action="next" ${state.page >= Math.ceil(state.total / state.pageSize) ? 'disabled' : ''}>下一页</button></div></div>`, '回复列表', '搜索、筛选、分页管理全部自定义回复。');
@@ -91,7 +98,7 @@ function settingsView() {
 function render() {
   if (state.loading) { app.innerHTML = '<div class="content"><div class="panel empty">正在连接自定义回复插件…</div></div>'; return; }
   const views = { overview: overviewView, rules: rulesView, create: formView, transfer: transferView, stats: statsView, settings: settingsView };
-  app.innerHTML = views[state.tab]() + folderDialogView();
+  app.innerHTML = views[state.tab]() + folderDialogView() + confirmDialogView();
   bind();
 }
 
@@ -116,7 +123,7 @@ function readForm() {
 }
 
 async function load() {
-  state.loading = true; render();
+  state.loading = true; state.error = ''; render();
   try {
     const [overview, settings, folders] = await Promise.all([apiGet('overview'), apiGet('settings'), apiGet('folders')]);
     state.overview = overview; state.settings = settings; state.folders = folders.rows || [];
@@ -183,6 +190,27 @@ async function submitFolder() {
   catch (error) { dialog.error = error.message || String(error); render(); }
 }
 
+function openConfirmDialog(dialog) {
+  state.confirmDialog = dialog;
+  render();
+}
+
+async function submitConfirm() {
+  const dialog = state.confirmDialog;
+  if (!dialog) return;
+  try {
+    if (dialog.kind === 'delete-reply') {
+      await apiPost('rules/delete', { id: dialog.id, confirm: true });
+      state.confirmDialog = null; state.draft = null; state.tab = 'rules'; await loadRules(); notify('回复已删除。');
+      return;
+    }
+    if (dialog.kind === 'import') {
+      const result = await apiPost('import', state.pendingImport?.payload || {});
+      state.confirmDialog = null; state.pendingImport = null; notify(`已导入 ${result.imported} 条回复。`); await load();
+    }
+  } catch (error) { notify(error.message || String(error), true); }
+}
+
 async function deleteFolder() {
   const folder = state.folders.find(item => item.id === state.filters.folder_id);
   openDeleteFolderDialog(folder);
@@ -201,29 +229,36 @@ async function action(event) {
     if (act === 'delete-folder') { await deleteFolder(); return; }
     if (act === 'folder-cancel') { state.folderDialog = null; render(); return; }
     if (act === 'folder-submit') { await submitFolder(); return; }
+    if (act === 'confirm-cancel') { state.confirmDialog = null; state.pendingImport = null; render(); return; }
+    if (act === 'confirm-submit') { await submitConfirm(); return; }
     if (act === 'edit') { state.draft = await apiGet(`rules/${encodeURIComponent(button.dataset.id)}`); state.tab = 'create'; render(); return; }
     if (act === 'toggle') { const row = state.rules.find(item => item.id === button.dataset.id); await apiPost('rules/toggle', { id: button.dataset.id, enabled: !row.enabled }); await loadRules(); render(); return; }
     if (act === 'copy') { const result = await apiPost('rules/duplicate', { id: button.dataset.id }); state.draft = result.rule; state.tab = 'create'; render(); return; }
-    if (act === 'delete' || act === 'delete-current') { const id = button.dataset.id || state.draft?.id; if (!id || !window.confirm('确定删除这条回复吗？删除后不可恢复。')) return; await apiPost('rules/delete', { id, confirm: true }); state.draft = null; state.tab = 'rules'; await loadRules(); notify('回复已删除。'); return; }
+    if (act === 'delete' || act === 'delete-current') { const id = button.dataset.id || state.draft?.id; if (!id) return; openConfirmDialog({ kind: 'delete-reply', id, title: '删除回复', message: '删除后不可恢复，确定继续吗？', confirmLabel: '删除回复' }); return; }
     if (act === 'save') { await saveReply(); return; }
     if (act === 'test') { await testReply(); return; }
     if (act === 'add-component') { state.draft = readForm(); state.draft.components.push({ type: 'image', value: '', name: '' }); render(); return; }
     if (act === 'remove-component') { state.draft = readForm(); state.draft.components.splice(Number(button.dataset.index), 1); render(); return; }
-    if (act === 'export') { const data = await apiGet('export'); const blob = new Blob([json(data)], { type: 'application/json' }); const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = 'custom-replies.json'; link.click(); URL.revokeObjectURL(link.href); notify('回复和文件夹已导出。'); return; }
+    if (act === 'export') { const data = await apiGet('export'); const blob = new Blob([json(data)], { type: 'application/json' }); const link = document.createElement('a'); const objectUrl = URL.createObjectURL(blob); link.href = objectUrl; link.download = 'custom-replies.json'; link.style.display = 'none'; document.body.appendChild(link); link.click(); setTimeout(() => { URL.revokeObjectURL(objectUrl); link.remove(); }, 0); notify('回复和文件夹已导出。'); return; }
     if (act === 'save-settings') { const settings = { require_wake: document.getElementById('require_wake').checked, scope_mode: document.getElementById('global_scope_mode').value, group_ids: document.getElementById('global_groups').value.split(/[,\n]/).map(x => x.trim()).filter(Boolean), user_ids: document.getElementById('global_users').value.split(/[,\n]/).map(x => x.trim()).filter(Boolean), webui_admins: document.getElementById('webui_admins').value.split(/[,\n]/).map(x => x.trim()).filter(Boolean) }; state.settings = (await apiPost('settings/save', settings)).settings; state.overview = await apiGet('overview'); notify('全局设置已保存。'); }
   } catch (error) { notify(error.message || String(error), true); }
 }
 
 function bind() {
-  document.querySelectorAll('[data-nav]').forEach(button => button.addEventListener('click', () => switchTab(button.dataset.nav)));
+  document.querySelectorAll('[data-nav]').forEach(button => button.addEventListener('click', async () => {
+    try { await switchTab(button.dataset.nav); }
+    catch (error) { notify(error.message || String(error), true); }
+  }));
   app.onclick = action;
   const folderForm = document.getElementById('folder-form');
   if (folderForm) folderForm.addEventListener('submit', event => { event.preventDefault(); submitFolder(); });
   const backdrop = document.querySelector('[data-folder-dialog-backdrop]');
   if (backdrop) backdrop.addEventListener('click', event => { if (event.target === backdrop) { state.folderDialog = null; render(); } });
+  const confirmBackdrop = document.querySelector('[data-confirm-dialog-backdrop]');
+  if (confirmBackdrop) confirmBackdrop.addEventListener('click', event => { if (event.target === confirmBackdrop) { state.confirmDialog = null; state.pendingImport = null; render(); } });
   document.querySelectorAll('[data-folder-rule]').forEach(select => select.addEventListener('change', async event => { try { await apiPost('rules/move', { id: event.target.dataset.folderRule, folder_id: event.target.value }); await loadRules(); notify(event.target.value ? '回复已移入文件夹。' : '回复已移出文件夹。'); } catch (error) { notify(error.message || String(error), true); } }));
   const input = document.getElementById('import-file');
-  if (input) input.addEventListener('change', async () => { const file = input.files[0]; if (!file) return; document.getElementById('import-name').textContent = file.name; if (!window.confirm('导入会替换当前回复和文件夹，确定继续吗？')) return; try { const payload = JSON.parse(await file.text()); const result = await apiPost('import', payload); notify(`已导入 ${result.imported} 条回复。`); await load(); } catch (error) { notify(error.message || String(error), true); } });
+  if (input) input.addEventListener('change', async () => { const file = input.files[0]; if (!file) return; document.getElementById('import-name').textContent = file.name; try { const payload = JSON.parse(await file.text()); state.pendingImport = { name: file.name, payload }; openConfirmDialog({ kind: 'import', title: '导入回复', message: '导入会替换当前回复和文件夹，确定继续吗？', confirmLabel: '确认导入' }); } catch (error) { notify(`导入文件不是有效 JSON：${error.message || String(error)}`, true); } });
   const type = document.getElementById('reply_type');
   if (type) type.addEventListener('change', () => { state.draft = readForm(); state.draft.reply_type = type.value; render(); });
 }

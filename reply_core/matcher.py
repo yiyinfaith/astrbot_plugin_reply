@@ -13,9 +13,20 @@ from .models import normalize_rule
 MATCH_RANK = {"exact": 4, "prefix": 3, "contains": 2, "regex": 1}
 
 
-def normalize_text(value: Any, *, case_sensitive: bool = False) -> str:
-    text = unicodedata.normalize("NFKC", str(value or "")).replace("\u200b", "")
-    text = " ".join(text.strip().split())
+def normalize_text(
+    value: Any,
+    *,
+    case_sensitive: bool = False,
+    unicode_nfkc: bool = True,
+    collapse_whitespace: bool = True,
+) -> str:
+    text = str(value or "").replace("\u200b", "")
+    if unicode_nfkc:
+        text = unicodedata.normalize("NFKC", text)
+    if collapse_whitespace:
+        text = " ".join(text.strip().split())
+    else:
+        text = text.strip()
     return text if case_sensitive else text.casefold()
 
 
@@ -33,11 +44,19 @@ def scope_allowed(rule: dict[str, Any], group_id: str = "", user_id: str = "") -
     return _in_scope(normalize_rule(rule), str(group_id or ""), str(user_id or ""))
 
 
-def match_keyword(rule: dict[str, Any], message: str) -> tuple[bool, int, str]:
+def match_keyword(
+    rule: dict[str, Any],
+    message: str,
+    *,
+    normalization: dict[str, Any] | None = None,
+) -> tuple[bool, int, str]:
     rule = normalize_rule(rule)
-    value = normalize_text(message, case_sensitive=rule["case_sensitive"])
+    normalization = normalization or {}
+    unicode_nfkc = bool(normalization.get("unicode_nfkc", True))
+    collapse_whitespace = bool(normalization.get("collapse_whitespace", True))
+    value = normalize_text(message, case_sensitive=rule["case_sensitive"], unicode_nfkc=unicode_nfkc, collapse_whitespace=collapse_whitespace)
     for keyword in rule["keywords"]:
-        candidate = normalize_text(keyword, case_sensitive=rule["case_sensitive"])
+        candidate = normalize_text(keyword, case_sensitive=rule["case_sensitive"], unicode_nfkc=unicode_nfkc, collapse_whitespace=collapse_whitespace)
         if not candidate:
             continue
         try:
@@ -67,10 +86,20 @@ def _parse_hhmm(value: str) -> time | None:
 
 
 def allowed_time(rule: dict[str, Any], now: datetime | None = None) -> bool:
-    start = _parse_hhmm(str((rule.get("time_range") or {}).get("start") or ""))
-    end = _parse_hhmm(str((rule.get("time_range") or {}).get("end") or ""))
-    if start is None or end is None:
+    time_range = rule.get("time_range") or {}
+    raw_start = str(time_range.get("start") or "").strip()
+    raw_end = str(time_range.get("end") or "").strip()
+    if not raw_start and not raw_end:
         return True
+    # A partially configured or malformed window must fail closed. Otherwise a
+    # corrupted state file could silently turn a restricted reply into an
+    # unrestricted one.
+    if not raw_start or not raw_end:
+        return False
+    start = _parse_hhmm(raw_start)
+    end = _parse_hhmm(raw_end)
+    if start is None or end is None:
+        return False
     current = (now or datetime.now().astimezone()).time().replace(second=0, microsecond=0)
     if start == end:
         return True
@@ -93,13 +122,14 @@ def matching_candidates(
     group_id: str = "",
     user_id: str = "",
     now: datetime | None = None,
+    normalization: dict[str, Any] | None = None,
 ) -> list[Candidate]:
     result: list[Candidate] = []
     for raw in rules:
         rule = normalize_rule(raw)
         if not rule["enabled"] or not _in_scope(rule, group_id, user_id) or not allowed_time(rule, now):
             continue
-        matched, length, keyword = match_keyword(rule, message)
+        matched, length, keyword = match_keyword(rule, message, normalization=normalization)
         if matched:
             result.append(Candidate(rule, length, keyword))
     result.sort(

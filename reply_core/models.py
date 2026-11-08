@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 MATCH_TYPES = {"exact", "contains", "prefix", "regex"}
@@ -78,6 +78,21 @@ def _non_negative_int(value: Any, default: int = 0, maximum: int = 365 * 24 * 36
     return max(0, min(number, maximum))
 
 
+def _bool_value(value: Any, default: bool = False) -> bool:
+    """Normalize JSON and form boolean values without treating ``"false"`` as true."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().casefold()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off", ""}:
+            return False
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return default
+
+
 def normalize_rule(raw: Any) -> dict[str, Any]:
     """Return a safe, complete rule copy suitable for storage and runtime."""
     source = raw if isinstance(raw, dict) else {}
@@ -85,11 +100,11 @@ def normalize_rule(raw: Any) -> dict[str, Any]:
     base["id"] = str(base.get("id") or uuid4())[:80]
     base["name"] = str(base.get("name") or "未命名回复").strip()[:120]
     base["folder_id"] = str(base.get("folder_id") or "").strip()[:80]
-    base["keywords"] = _string_list(base.get("keywords"))[:100]
+    base["keywords"] = [item[:2000] for item in _string_list(base.get("keywords"))[:100]]
     base["match_type"] = str(base.get("match_type") or "exact").lower()
     if base["match_type"] not in MATCH_TYPES:
         base["match_type"] = "exact"
-    base["case_sensitive"] = bool(base.get("case_sensitive", False))
+    base["case_sensitive"] = _bool_value(base.get("case_sensitive", False))
     base["reply_type"] = str(base.get("reply_type") or "text").lower()
     if base["reply_type"] not in REPLY_TYPES:
         base["reply_type"] = "text"
@@ -107,7 +122,7 @@ def normalize_rule(raw: Any) -> dict[str, Any]:
         if component["type"] in MEDIA_TYPES:
             safe_components.append(component)
     base["components"] = safe_components
-    scope = base.get("scope") if isinstance(base.get("scope"), dict) else {}
+    scope = cast(dict[str, Any], base.get("scope")) if isinstance(base.get("scope"), dict) else {}
     mode = str(scope.get("mode") or "blacklist").lower()
     base["scope"] = {
         "mode": mode if mode in SCOPE_MODES else "blacklist",
@@ -119,20 +134,20 @@ def normalize_rule(raw: Any) -> dict[str, Any]:
     except (TypeError, ValueError):
         priority = 0
     base["priority"] = max(-100_000, min(priority, 100_000))
-    base["enabled"] = bool(base.get("enabled", True))
-    cooldown = base.get("cooldown") if isinstance(base.get("cooldown"), dict) else {}
+    base["enabled"] = _bool_value(base.get("enabled", True), default=True)
+    cooldown = cast(dict[str, Any], base.get("cooldown")) if isinstance(base.get("cooldown"), dict) else {}
     base["cooldown"] = {
         "rule_seconds": _non_negative_int(cooldown.get("rule_seconds")),
         "user_seconds": _non_negative_int(cooldown.get("user_seconds")),
         "group_seconds": _non_negative_int(cooldown.get("group_seconds")),
     }
     base["daily_limit"] = _non_negative_int(base.get("daily_limit"), 0, 1_000_000)
-    time_range = base.get("time_range") if isinstance(base.get("time_range"), dict) else {}
+    time_range = cast(dict[str, Any], base.get("time_range")) if isinstance(base.get("time_range"), dict) else {}
     base["time_range"] = {
         "start": str(time_range.get("start") or "")[:5],
         "end": str(time_range.get("end") or "")[:5],
     }
-    stats = base.get("stats") if isinstance(base.get("stats"), dict) else {}
+    stats = cast(dict[str, Any], base.get("stats")) if isinstance(base.get("stats"), dict) else {}
     base["stats"] = {
         "trigger_count": _non_negative_int(stats.get("trigger_count"), 0, 2_147_483_647),
         "last_trigger_at": str(stats.get("last_trigger_at") or ""),

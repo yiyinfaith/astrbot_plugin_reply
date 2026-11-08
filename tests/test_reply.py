@@ -37,6 +37,17 @@ class ReplyCoreTests(unittest.TestCase):
         self.assertTrue(allowed_time(overnight, datetime(2026, 1, 1, 23, 30, tzinfo=timezone.utc)))
         self.assertTrue(allowed_time(overnight, datetime(2026, 1, 2, 1, 30, tzinfo=timezone.utc)))
         self.assertFalse(allowed_time(overnight, datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)))
+        self.assertFalse(allowed_time(default_rule(keywords=["hello"], time_range={"start": "09:00", "end": ""}), datetime(2026, 1, 1, 9, 30, tzinfo=timezone.utc)))
+
+    def test_boolean_and_normalization_settings_are_safe(self):
+        rule = default_rule(enabled="false", case_sensitive="false", keywords=["hello"])
+        self.assertFalse(rule["enabled"])
+        self.assertFalse(rule["case_sensitive"])
+        with tempfile.TemporaryDirectory() as directory:
+            store = ReplyStore(directory)
+            settings = store.update_settings({"require_wake": "false", "normalization": {"collapse_whitespace": False}})
+            self.assertFalse(settings["require_wake"])
+            self.assertFalse(settings["normalization"]["collapse_whitespace"])
 
     def test_random_reply_and_variables(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -60,6 +71,33 @@ class ReplyCoreTests(unittest.TestCase):
             self.assertIsNotNone(engine.select("ping", user_id="u1", now=datetime(2026, 1, 1, 0, 1, 1, tzinfo=timezone.utc)))
             reloaded = ReplyStore(directory)
             self.assertEqual(reloaded.state["rules"][0]["stats"]["trigger_count"], 1)
+
+    def test_malformed_usage_and_global_scope_preview_fail_safe(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ReplyStore(directory)
+            store.state["usage"] = {"bad": {"last": "not-a-number", "users": [], "groups": {}, "daily": {"today": "bad"}}}
+            rule = default_rule(name="受限", keywords=["secret"], content="no", scope={"mode": "whitelist", "group_ids": ["g1"], "user_ids": []})
+            store.upsert_rule(rule)
+            engine = ReplyEngine(store)
+            self.assertIsNone(engine.select("secret", group_id="g2"))
+            self.assertFalse(engine.preview("secret", group_id="g2")["matched"])
+            self.assertIsNotNone(engine.select("secret", group_id="g1"))
+
+    def test_import_replaces_rules_atomically_and_preserves_unspecified_settings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ReplyStore(directory)
+            store.update_settings({"user_ids": ["u1"], "normalization": {"collapse_whitespace": False}})
+            store.upsert_rule(default_rule(name="old", keywords=["old"], content="old"))
+            store.replace_state(
+                [default_rule(name="new", keywords=["new"], content="new")],
+                folders=[],
+                settings={"scope_mode": "whitelist"},
+                reset_usage=True,
+            )
+            self.assertEqual([row["name"] for row in store.state["rules"]], ["new"])
+            self.assertEqual(store.state["settings"]["user_ids"], ["u1"])
+            self.assertFalse(store.state["settings"]["normalization"]["collapse_whitespace"])
+            self.assertEqual(store.state["settings"]["scope_mode"], "whitelist")
 
     def test_webui_requires_authenticated_admin(self):
         holder = object.__new__(webui.ReplyWebUI)
@@ -121,8 +159,23 @@ class ReplyCoreTests(unittest.TestCase):
                 request.payload = {"id": folder["id"]}
                 denied_delete = asyncio.run(holder.delete_folder())
                 self.assertEqual(denied_delete.status_code, 400)
+                request.payload = {"id": folder["id"], "confirm": "false"}
+                denied_string_delete = asyncio.run(holder.delete_folder())
+                self.assertEqual(denied_string_delete.status_code, 400)
                 request.payload = {"id": folder["id"], "confirm": True}
                 self.assertTrue(asyncio.run(holder.delete_folder())["deleted"])
+
+    def test_webui_rejects_unsafe_or_incomplete_reply_payloads(self):
+        holder = object.__new__(webui.ReplyWebUI)
+        invalid_name, error = holder._validate_rule({"keywords": ["x"], "content": "ok"})
+        self.assertIsNone(invalid_name)
+        self.assertIn("名称", error)
+        invalid_time, error = holder._validate_rule({"name": "x", "keywords": ["x"], "content": "ok", "time_range": {"start": "09:00", "end": ""}})
+        self.assertIsNone(invalid_time)
+        self.assertIn("同时", error)
+        invalid_at, error = holder._validate_rule({"name": "x", "keywords": ["x"], "reply_type": "media", "components": [{"type": "at"}]})
+        self.assertIsNone(invalid_at)
+        self.assertIn("at", error)
 
 
 if __name__ == "__main__":

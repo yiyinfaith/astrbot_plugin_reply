@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import random
 import re
 from copy import deepcopy
@@ -34,25 +35,19 @@ def render_variables(value: Any, context: dict[str, Any]) -> Any:
     return value
 
 
-def _timestamp(value: Any) -> float:
-    try:
-        return datetime.fromisoformat(str(value)).timestamp()
-    except (TypeError, ValueError, OverflowError):
-        return 0.0
-
-
 class ReplyEngine:
     def __init__(self, store, *, rng: random.Random | None = None):
         self.store = store
         self.rng = rng or random.Random()
 
-    @staticmethod
-    def event_context(event) -> dict[str, str]:
+    def event_context(self, event) -> dict[str, str]:
         sender_id = str(event.get_sender_id() or "") if hasattr(event, "get_sender_id") else ""
         nickname = str(event.get_sender_name() or "") if hasattr(event, "get_sender_name") else ""
         group_id = str(event.get_group_id() or "") if hasattr(event, "get_group_id") else ""
         message_obj = getattr(event, "message_obj", None)
-        group_name = str(getattr(message_obj, "group_name", "") or "")
+        group_name = str(
+            (message_obj.get("group_name", "") if isinstance(message_obj, dict) else getattr(message_obj, "group_name", "")) or ""
+        )
         now = datetime.now().astimezone()
         return {
             "sender": sender_id,
@@ -61,7 +56,7 @@ class ReplyEngine:
             "group_name": group_name,
             "time": now.strftime("%H:%M:%S"),
             "date": now.strftime("%Y-%m-%d"),
-            "random": str(random.randint(0, 999999)),
+            "random": str(self.rng.randint(0, 999999)),
         }
 
     def _global_scope_allowed(self, group_id: str, user_id: str) -> bool:
@@ -72,70 +67,103 @@ class ReplyEngine:
         hit = (group_id and group_id in groups) or (user_id and user_id in users)
         return not hit if mode == "blacklist" else bool(hit)
 
+    def _normalization(self) -> dict[str, bool]:
+        value = self.store.state.get("settings", {}).get("normalization", {})
+        if not isinstance(value, dict):
+            value = {}
+        return {
+            "unicode_nfkc": value.get("unicode_nfkc", True) if isinstance(value.get("unicode_nfkc", True), bool) else True,
+            "collapse_whitespace": value.get("collapse_whitespace", True) if isinstance(value.get("collapse_whitespace", True), bool) else True,
+        }
+
     def _usage(self, rule_id: str) -> dict[str, Any]:
-        usage = self.store.state.setdefault("usage", {})
-        row = usage.setdefault(rule_id, {"last": 0.0, "users": {}, "groups": {}, "daily": {}})
-        row.setdefault("users", {})
-        row.setdefault("groups", {})
-        row.setdefault("daily", {})
+        usage = self.store.state.get("usage")
+        if not isinstance(usage, dict):
+            usage = {}
+            self.store.state["usage"] = usage
+        row = usage.get(rule_id)
+        if not isinstance(row, dict):
+            row = {"last": 0.0, "users": {}, "groups": {}, "daily": {}}
+            usage[rule_id] = row
+        for key in ("users", "groups", "daily"):
+            if not isinstance(row.get(key), dict):
+                row[key] = {}
         return row
+
+    @staticmethod
+    def _number(value: Any, default: float = 0.0) -> float:
+        try:
+            number = float(value)
+            return number if math.isfinite(number) else default
+        except (TypeError, ValueError, OverflowError):
+            return default
+
+    @staticmethod
+    def _integer(value: Any, default: int = 0) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError, OverflowError):
+            return default
 
     def _eligible(self, candidate: Candidate, user_id: str, group_id: str, now: datetime) -> bool:
         rule = candidate.rule
         usage = self._usage(rule["id"])
         limits = rule.get("cooldown", {})
         stamp = now.timestamp()
-        if stamp - float(usage.get("last", 0.0) or 0.0) < int(limits.get("rule_seconds", 0) or 0):
+        if stamp - self._number(usage.get("last", 0.0)) < int(limits.get("rule_seconds", 0) or 0):
             return False
-        if user_id and stamp - float(usage["users"].get(user_id, 0.0) or 0.0) < int(limits.get("user_seconds", 0) or 0):
+        if user_id and stamp - self._number(usage["users"].get(user_id, 0.0)) < int(limits.get("user_seconds", 0) or 0):
             return False
-        if group_id and stamp - float(usage["groups"].get(group_id, 0.0) or 0.0) < int(limits.get("group_seconds", 0) or 0):
+        if group_id and stamp - self._number(usage["groups"].get(group_id, 0.0)) < int(limits.get("group_seconds", 0) or 0):
             return False
         today = now.date().isoformat()
         daily = usage["daily"]
-        count = int(daily.get(today, 0) or 0)
-        limit = int(rule.get("daily_limit", 0) or 0)
+        count = max(0, self._integer(daily.get(today, 0), 0))
+        limit = max(0, self._integer(rule.get("daily_limit", 0), 0))
         return not limit or count < limit
 
     def select(self, message: str, *, group_id: str = "", user_id: str = "", now: datetime | None = None) -> Candidate | None:
-        if not self._global_scope_allowed(str(group_id), str(user_id)):
+        with self.store.locked():
+            if not self._global_scope_allowed(str(group_id), str(user_id)):
+                return None
+            current = now or datetime.now().astimezone()
+            for candidate in matching_candidates(self.store.state.get("rules", []), message, group_id=group_id, user_id=user_id, now=current, normalization=self._normalization()):
+                if self._eligible(candidate, str(user_id), str(group_id), current):
+                    return candidate
             return None
-        current = now or datetime.now().astimezone()
-        for candidate in matching_candidates(self.store.state.get("rules", []), message, group_id=group_id, user_id=user_id, now=current):
-            if self._eligible(candidate, str(user_id), str(group_id), current):
-                return candidate
-        return None
 
     def record_trigger(self, rule_id: str, *, user_id: str = "", group_id: str = "", now: datetime | None = None) -> None:
-        current = now or datetime.now().astimezone()
-        stamp = current.timestamp()
-        usage = self._usage(rule_id)
-        usage["last"] = stamp
-        if user_id:
-            usage["users"][str(user_id)] = stamp
-        if group_id:
-            usage["groups"][str(group_id)] = stamp
-        today = current.date().isoformat()
-        usage["daily"][today] = int(usage["daily"].get(today, 0) or 0) + 1
-        for key in list(usage["daily"]):
-            if key != today:
-                try:
-                    if (current.date() - datetime.fromisoformat(key).date()).days > 7:
+        with self.store.locked():
+            current = now or datetime.now().astimezone()
+            stamp = current.timestamp()
+            usage = self._usage(rule_id)
+            usage["last"] = stamp
+            if user_id:
+                usage["users"][str(user_id)] = stamp
+            if group_id:
+                usage["groups"][str(group_id)] = stamp
+            today = current.date().isoformat()
+            usage["daily"][today] = max(0, self._integer(usage["daily"].get(today, 0), 0)) + 1
+            for key in list(usage["daily"]):
+                if key != today:
+                    try:
+                        if (current.date() - datetime.fromisoformat(key).date()).days > 7:
+                            usage["daily"].pop(key, None)
+                    except ValueError:
                         usage["daily"].pop(key, None)
-                except ValueError:
-                    usage["daily"].pop(key, None)
-        for key in ("users", "groups"):
-            if len(usage[key]) > 5000:
-                ordered = sorted(usage[key].items(), key=lambda pair: float(pair[1]))[-2500:]
-                usage[key] = dict(ordered)
-        for rule in self.store.state.get("rules", []):
-            if rule.get("id") == rule_id:
-                stats = rule.setdefault("stats", {})
-                stats["trigger_count"] = int(stats.get("trigger_count", 0) or 0) + 1
-                stats["last_trigger_at"] = utc_now()
-                rule["updated_at"] = utc_now()
-                break
-        self.store.save()
+            for key in ("users", "groups"):
+                if len(usage[key]) > 5000:
+                    ordered = sorted(usage[key].items(), key=lambda pair: self._number(pair[1]))[-2500:]
+                    usage[key] = dict(ordered)
+            for rule in self.store.state.get("rules", []):
+                if rule.get("id") == rule_id:
+                    stats = rule.get("stats") if isinstance(rule.get("stats"), dict) else {}
+                    rule["stats"] = stats
+                    stats["trigger_count"] = max(0, self._integer(stats.get("trigger_count", 0), 0)) + 1
+                    stats["last_trigger_at"] = utc_now()
+                    rule["updated_at"] = utc_now()
+                    break
+            self.store.save()
 
     def choose_reply(self, rule: dict[str, Any], context: dict[str, Any]) -> Any:
         rule = normalize_rule(rule)
@@ -151,8 +179,10 @@ class ReplyEngine:
         return render_variables(rule.get("content", ""), context)
 
     def preview(self, message: str, *, group_id: str = "", user_id: str = "", context: dict[str, Any] | None = None) -> dict[str, Any]:
+        if not self._global_scope_allowed(str(group_id), str(user_id)):
+            return {"matched": False, "reply": "", "rule": None}
         candidate = None
-        for item in matching_candidates(self.store.state.get("rules", []), message, group_id=group_id, user_id=user_id):
+        for item in matching_candidates(self.store.state.get("rules", []), message, group_id=group_id, user_id=user_id, normalization=self._normalization()):
             candidate = item
             break
         if candidate is None:

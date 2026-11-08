@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from copy import deepcopy
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 try:  # Keep pure unit tests runnable without installing the full AstrBot extras.
@@ -25,7 +25,15 @@ except ImportError:  # pragma: no cover - only used outside an AstrBot runtime
     request = SimpleNamespace(username=None, query={}, json=None)
 
 from .engine import ReplyEngine
-from .models import DEFAULT_SETTINGS, normalize_folder, normalize_rule, utc_now
+from .models import (
+    DEFAULT_SETTINGS,
+    MATCH_TYPES,
+    REPLY_TYPES,
+    SCOPE_MODES,
+    normalize_folder,
+    normalize_rule,
+    utc_now,
+)
 
 
 class ReplyWebUI:
@@ -72,9 +80,36 @@ class ReplyWebUI:
 
     @staticmethod
     def _validate_rule(rule: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
-        normalized = normalize_rule(rule)
-        if not normalized["name"]:
+        if not str(rule.get("name") or "").strip():
             return None, "回复名称不能为空"
+        raw_match_type = str(rule.get("match_type") or "exact").strip().lower()
+        if raw_match_type not in MATCH_TYPES:
+            return None, "匹配方式无效"
+        raw_reply_type = str(rule.get("reply_type") or "text").strip().lower()
+        if raw_reply_type not in REPLY_TYPES:
+            return None, "回复类型无效"
+        raw_keywords = rule.get("keywords")
+        if isinstance(raw_keywords, str):
+            raw_keywords = raw_keywords.replace("\r\n", "\n").split("\n")
+        if isinstance(raw_keywords, (list, tuple)) and any(len(str(item)) > 2000 for item in raw_keywords):
+            return None, "单个关键词长度不能超过 2000 个字符"
+        if "time_range" in rule and rule.get("time_range") is not None and not isinstance(rule.get("time_range"), dict):
+            return None, "允许时间段格式无效"
+        raw_time = cast(dict[str, Any], rule.get("time_range")) if isinstance(rule.get("time_range"), dict) else {}
+        raw_start = str(raw_time.get("start") or "").strip()
+        raw_end = str(raw_time.get("end") or "").strip()
+        if bool(raw_start) != bool(raw_end):
+            return None, "允许时间段必须同时填写开始和结束时间"
+        for value in (raw_start, raw_end):
+            if value and not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", value):
+                return None, "允许时间段必须使用 HH:MM 格式"
+        raw_scope = cast(dict[str, Any], rule.get("scope")) if isinstance(rule.get("scope"), dict) else {}
+        raw_scope_mode = str(raw_scope.get("mode") or "blacklist").strip().lower()
+        if raw_scope_mode not in SCOPE_MODES:
+            return None, "作用域模式无效"
+        if "components" in rule and rule.get("components") is not None and not isinstance(rule.get("components"), list):
+            return None, "消息组件必须是数组"
+        normalized = normalize_rule(rule)
         if not normalized["keywords"]:
             return None, "至少填写一个关键词"
         if normalized["reply_type"] == "text" and not normalized["content"]:
@@ -85,16 +120,15 @@ class ReplyWebUI:
             return None, "多媒体回复至少需要一个消息组件"
         if normalized["match_type"] == "regex":
             for keyword in normalized["keywords"]:
+                if len(keyword) > 2000:
+                    return None, "正则表达式长度不能超过 2000 个字符"
                 try:
                     re.compile(keyword)
                 except re.error as exc:
                     return None, f"正则表达式无效：{exc}"
-        for value in normalized["time_range"].values():
-            if value and not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", value):
-                return None, "允许时间段必须使用 HH:MM 格式"
         for component in normalized["components"]:
             kind = component.get("type")
-            if kind != "at" and not str(component.get("value") or component.get("url") or component.get("file") or "").strip():
+            if not str(component.get("value") or component.get("url") or component.get("file") or "").strip():
                 return None, f"{kind} 组件缺少资源地址或路径"
         return normalized, None
 
@@ -205,7 +239,7 @@ class ReplyWebUI:
         if (failure := self._guard()) is not None:
             return failure
         payload = await request.json(default={})
-        if not isinstance(payload, dict) or not payload.get("confirm"):
+        if not isinstance(payload, dict) or payload.get("confirm") is not True:
             return error_response("删除文件夹需要二次确认。", status_code=400)
         folder_id = str(payload.get("id") or "").strip()
         if not folder_id:
@@ -232,7 +266,7 @@ class ReplyWebUI:
         if (failure := self._guard()) is not None:
             return failure
         payload = await request.json(default={})
-        if not isinstance(payload, dict) or not payload.get("confirm"):
+        if not isinstance(payload, dict) or payload.get("confirm") is not True:
             return error_response("删除操作需要二次确认。", status_code=400)
         rule_id = str(payload.get("id") or "").strip()
         if not rule_id:
@@ -280,7 +314,7 @@ class ReplyWebUI:
         message = str(payload.get("message") or "")
         if not message:
             return error_response("模拟消息不能为空", status_code=400)
-        context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+        context = cast(dict[str, Any], payload.get("context")) if isinstance(payload.get("context"), dict) else {}
         return json_response(self.engine.preview(message, group_id=str(context.get("group_id") or ""), user_id=str(context.get("sender") or ""), context=context))
 
     async def export_rules(self):
@@ -295,27 +329,38 @@ class ReplyWebUI:
         if not isinstance(payload, dict) or not isinstance(payload.get("rules"), list):
             return error_response("导入文件必须包含 rules 数组", status_code=400)
         validated = []
+        rule_ids: set[str] = set()
         for raw in payload["rules"]:
             if not isinstance(raw, dict):
                 return error_response("rules 中包含无效项目", status_code=400)
             rule, error = self._validate_rule(raw)
             if error:
                 return error_response(f"导入失败：{error}", status_code=400)
+            if rule is None:
+                return error_response("导入失败：回复数据无效", status_code=400)
+            if rule["id"] in rule_ids:
+                return error_response("导入失败：回复 ID 重复", status_code=400)
+            rule_ids.add(rule["id"])
             validated.append(rule)
         folders = payload.get("folders", [])
         if not isinstance(folders, list):
             return error_response("folders 必须是数组", status_code=400)
         normalized_folders = []
+        folder_ids: set[str] = set()
         for raw_folder in folders:
             if not isinstance(raw_folder, dict):
                 return error_response("folders 中包含无效项目", status_code=400)
             folder, error = self._validate_folder(raw_folder)
             if error:
                 return error_response(f"导入失败：{error}", status_code=400)
+            if folder is None:
+                return error_response("导入失败：文件夹数据无效", status_code=400)
+            if folder["id"] in folder_ids:
+                return error_response("导入失败：文件夹 ID 重复", status_code=400)
+            folder_ids.add(folder["id"])
             normalized_folders.append(folder)
-        self.store.replace_rules(validated, folders=normalized_folders)
-        if isinstance(payload.get("settings"), dict):
-            self.store.update_settings(payload["settings"])
+        settings = payload.get("settings") if isinstance(payload.get("settings"), dict) else None
+        self.store.replace_state(validated, folders=normalized_folders, settings=settings, reset_usage=True)
         return json_response({"imported": len(validated)})
 
     async def stats(self):
