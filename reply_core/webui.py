@@ -7,32 +7,8 @@ from copy import deepcopy
 from typing import Any, cast
 from uuid import uuid4
 
-try:  # Keep pure unit tests runnable without installing the full AstrBot extras.
-    from astrbot.api import logger
-    from astrbot.api.web import error_response, json_response, request
-except ImportError:  # pragma: no cover - only used outside an AstrBot runtime
-    from types import SimpleNamespace
-
-    class _FallbackLogger:
-        """No-op logger used only when pure unit tests run without AstrBot."""
-
-        def debug(self, *args, **kwargs):
-            return None
-
-        info = debug
-        warning = debug
-        error = debug
-        exception = debug
-
-    logger = _FallbackLogger()
-
-    def error_response(message, status_code=400):
-        return SimpleNamespace(status_code=status_code, message=message)
-
-    def json_response(payload):
-        return payload
-
-    request = SimpleNamespace(username=None, query={}, json=None)
+from astrbot.api import logger
+from astrbot.api.web import error_response, json_response, request
 
 from .engine import ReplyEngine
 from .models import (
@@ -45,10 +21,10 @@ from .models import (
     utc_now,
 )
 
+PLUGIN_NAME = "astrbot_plugin_reply"
+
 
 class ReplyWebUI:
-    PREFIXES = ("astrbot_plugin_reply", "reply")
-
     def __init__(self, context, store, engine: ReplyEngine):
         self.context = context
         self.store = store
@@ -75,9 +51,8 @@ class ReplyWebUI:
             ("settings", self.settings, ["GET"]),
             ("settings/save", self.save_settings, ["POST"]),
         )
-        for prefix in self.PREFIXES:
-            for endpoint, handler, methods in routes:
-                self.context.register_web_api(f"/{prefix}/{endpoint}", handler, methods, f"Reply WebUI: {endpoint}")
+        for endpoint, handler, methods in routes:
+            self.context.register_web_api(f"/{PLUGIN_NAME}/{endpoint}", handler, methods, f"Reply WebUI: {endpoint}")
 
     def _guard(self):
         username = getattr(request, "username", None)
@@ -122,8 +97,10 @@ class ReplyWebUI:
         normalized = normalize_rule(rule)
         if not normalized["keywords"]:
             return None, "至少填写一个关键词"
-        if normalized["reply_type"] == "text" and not normalized["content"]:
+        if normalized["reply_type"] == "text" and not normalized["content"].strip():
             return None, "固定文本回复不能为空"
+        if normalized["reply_type"] == "composite" and not normalized["content"].strip():
+            return None, "多段文本回复不能为空"
         if normalized["reply_type"] == "random" and not normalized["random_replies"]:
             return None, "随机回复至少需要一条内容"
         if normalized["reply_type"] == "media" and not normalized["components"]:
@@ -134,7 +111,7 @@ class ReplyWebUI:
                     return None, "正则表达式长度不能超过 2000 个字符"
                 try:
                     re.compile(keyword)
-                except re.error as exc:
+                except (re.error, OverflowError, RecursionError) as exc:
                     return None, f"正则表达式无效：{exc}"
         for component in normalized["components"]:
             kind = component.get("type")
@@ -154,7 +131,9 @@ class ReplyWebUI:
         rules = self.store.state.get("rules", [])
         enabled = [row for row in rules if row.get("enabled")]
         top = sorted(rules, key=lambda row: int((row.get("stats") or {}).get("trigger_count", 0) or 0), reverse=True)[:5]
+        star = self.context.get_registered_star(PLUGIN_NAME)
         return json_response({
+            "version": getattr(star, "version", "") or "",
             "total": len(rules),
             "enabled": len(enabled),
             "disabled": len(rules) - len(enabled),
@@ -312,8 +291,7 @@ class ReplyWebUI:
         copy["name"] = f"{copy.get('name', '回复')}（副本）"
         copy["stats"] = {"trigger_count": 0, "last_trigger_at": ""}
         copy["created_at"] = copy["updated_at"] = utc_now()
-        self.store.upsert_rule(copy)
-        return json_response({"saved": True, "rule": copy})
+        return json_response({"saved": True, "rule": self.store.upsert_rule(copy)})
 
     async def test_rule(self):
         if (failure := self._guard()) is not None:
@@ -370,6 +348,9 @@ class ReplyWebUI:
             folder_ids.add(folder["id"])
             normalized_folders.append(folder)
         settings = payload.get("settings") if isinstance(payload.get("settings"), dict) else None
+        if settings is not None:
+            # A file from another instance must not lock out the current administrators.
+            settings = {key: value for key, value in settings.items() if key != "webui_admins"}
         self.store.replace_state(validated, folders=normalized_folders, settings=settings, reset_usage=True)
         return json_response({"imported": len(validated)})
 
@@ -394,5 +375,8 @@ class ReplyWebUI:
         payload = await request.json(default={})
         if not isinstance(payload, dict):
             return error_response("请求体必须是 JSON 对象", status_code=400)
-        settings = self.store.update_settings(payload)
+        try:
+            settings = self.store.update_settings(payload, acting_admin=request.username)
+        except ValueError as exc:
+            return error_response(str(exc), status_code=400)
         return json_response({"saved": True, "settings": settings})

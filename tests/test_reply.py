@@ -1,18 +1,107 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
+import json
 import random
+import sys
 import tempfile
+import types
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from reply_core import webui
 from reply_core.engine import ReplyEngine, render_variables
-from reply_core.matcher import allowed_time, matching_candidates, scope_allowed
+from reply_core.matcher import (
+    allowed_time,
+    match_keyword,
+    matching_candidates,
+    scope_allowed,
+)
 from reply_core.models import default_rule, normalize_rule
 from reply_core.storage import ReplyStore
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def load_plugin_main():
+    """Import main.py as a package so its relative imports resolve."""
+    package = sys.modules.get("astrbot_plugin_reply")
+    if package is None:
+        package = types.ModuleType("astrbot_plugin_reply")
+        package.__path__ = [str(ROOT)]
+        sys.modules["astrbot_plugin_reply"] = package
+    return importlib.import_module("astrbot_plugin_reply.main")
+
+
+class FakeRequest:
+    def __init__(self, username="root"):
+        self.username = username
+        self.query = {}
+        self.payload = {}
+
+    async def json(self, default=None):
+        return self.payload
+
+
+def web_patches(request):
+    """Use plain payloads so assertions work against stubs and real AstrBot."""
+    return patch.multiple(
+        webui,
+        request=request,
+        json_response=lambda payload: payload,
+        error_response=lambda message, status_code=400: SimpleNamespace(status_code=status_code, message=message),
+    )
+
+
+def webui_holder(store):
+    holder = object.__new__(webui.ReplyWebUI)
+    holder.store = store
+    holder.engine = ReplyEngine(store)
+    holder.context = SimpleNamespace(get_registered_star=lambda name: SimpleNamespace(version="v9.9.9"))
+    return holder
+
+
+class FakeEvent:
+    def __init__(self, message="ping", group_id="g1", group=None, is_wake=True, group_lookup=None):
+        self.message_str = message
+        self.is_at_or_wake_command = is_wake
+        self.message_obj = SimpleNamespace(group=group)
+        self._group_id = group_id
+        self._group_lookup = group_lookup
+        self.group_lookups = 0
+        self.results = []
+
+    def get_message_str(self):
+        return self.message_str
+
+    def get_sender_id(self):
+        return "u1"
+
+    def get_sender_name(self):
+        return "小吟"
+
+    def get_group_id(self):
+        return self._group_id
+
+    async def get_group(self):
+        self.group_lookups += 1
+        if isinstance(self._group_lookup, Exception):
+            raise self._group_lookup
+        return self._group_lookup
+
+    def chain_result(self, chain):
+        return chain
+
+
+def run_handler(plugin, event):
+    async def collect():
+        return [item async for item in plugin.handle_message(event)]
+
+    return asyncio.run(collect())
 
 
 class ReplyCoreTests(unittest.TestCase):
@@ -136,18 +225,8 @@ class ReplyCoreTests(unittest.TestCase):
             holder.store = store
             holder.engine = engine
 
-            class Request:
-                username = "root"
-
-                def __init__(self):
-                    self.query = {}
-                    self.payload = {}
-
-                async def json(self, default=None):
-                    return self.payload
-
-            request = Request()
-            with patch.object(webui, "request", request):
+            request = FakeRequest()
+            with web_patches(request):
                 request.payload = {"name": "菜单"}
                 saved = asyncio.run(holder.save_folder())
                 folder = saved["folder"]
@@ -176,6 +255,193 @@ class ReplyCoreTests(unittest.TestCase):
         invalid_at, error = holder._validate_rule({"name": "x", "keywords": ["x"], "reply_type": "media", "components": [{"type": "at"}]})
         self.assertIsNone(invalid_at)
         self.assertIn("at", error)
+
+    def test_composite_reply_keeps_line_breaks_in_one_message(self):
+        with tempfile.TemporaryDirectory() as directory:
+            engine = ReplyEngine(ReplyStore(directory))
+            rule = default_rule(reply_type="composite", keywords=["x"], content="第一段\n\n第二段")
+            chain = engine.build_chain(engine.choose_reply(rule, {}))
+            self.assertEqual([item.text for item in chain], ["第一段\n第二段"])
+
+    def test_group_name_comes_from_message_group(self):
+        with tempfile.TemporaryDirectory() as directory:
+            engine = ReplyEngine(ReplyStore(directory))
+            event = FakeEvent(group=SimpleNamespace(group_id="g1", group_name="吟窝"))
+            self.assertEqual(engine.event_context(event)["group_name"], "吟窝")
+            self.assertEqual(engine.event_context(FakeEvent(group=None))["group_name"], "")
+
+    def _plugin_with_rule(self, directory, **fields):
+        main = load_plugin_main()
+        plugin = object.__new__(main.KeywordReplyPlugin)
+        plugin.store = ReplyStore(directory)
+        plugin.engine = ReplyEngine(plugin.store)
+        rule = default_rule(name="r", keywords=["ping"], **fields)
+        plugin.store.upsert_rule(rule)
+        return plugin
+
+    def test_handler_looks_up_group_name_only_when_the_reply_uses_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            plugin = self._plugin_with_rule(directory, content="欢迎来到 {group_name}")
+            event = FakeEvent(group=SimpleNamespace(group_id="g1", group_name=None), group_lookup=SimpleNamespace(group_name="吟窝"))
+            self.assertEqual(run_handler(plugin, event)[0][0].text, "欢迎来到 吟窝")
+            self.assertEqual(event.group_lookups, 1)
+        with tempfile.TemporaryDirectory() as directory:
+            plugin = self._plugin_with_rule(directory, content="pong")
+            event = FakeEvent()
+            self.assertEqual(run_handler(plugin, event)[0][0].text, "pong")
+            self.assertEqual(event.group_lookups, 0)
+
+    def test_handler_still_replies_when_group_lookup_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            plugin = self._plugin_with_rule(directory, content="群：{group_name}")
+            event = FakeEvent(group_lookup=ConnectionError("platform down"))
+            self.assertEqual(run_handler(plugin, event)[0][0].text, "群：")
+
+    def test_group_lookup_does_not_let_concurrent_messages_skip_the_cooldown(self):
+        with tempfile.TemporaryDirectory() as directory:
+            plugin = self._plugin_with_rule(directory, content="{group_name}", cooldown={"rule_seconds": 3600})
+            rule_id = plugin.store.state["rules"][0]["id"]
+
+            class RacingEvent(FakeEvent):
+                async def get_group(self):
+                    plugin.engine.record_trigger(rule_id, user_id="other")
+                    return SimpleNamespace(group_name="吟窝")
+
+            self.assertEqual(run_handler(plugin, RacingEvent()), [])
+
+    def test_media_with_empty_value_after_rendering_is_skipped(self):
+        with tempfile.TemporaryDirectory() as directory:
+            engine = ReplyEngine(ReplyStore(directory))
+            self.assertEqual(engine.build_chain([{"type": "image", "value": ""}, {"type": "at", "value": ""}]), [])
+
+    def test_file_without_display_name_uses_the_real_file_name(self):
+        with tempfile.TemporaryDirectory() as directory:
+            engine = ReplyEngine(ReplyStore(directory))
+            local, remote, named = engine.build_chain([
+                {"type": "file", "value": "/data/report.pdf"},
+                {"type": "file", "value": "https://example.com/a/b.zip?x=1"},
+                {"type": "file", "value": "/data/report.pdf", "name": "周报"},
+            ])
+            self.assertEqual((local.name, remote.name, named.name), ("report.pdf", "b.zip", "周报"))
+
+    def test_editing_a_reply_keeps_its_live_statistics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ReplyStore(directory)
+            saved = store.upsert_rule(default_rule(name="a", keywords=["a"], content="a"))
+            ReplyEngine(store).record_trigger(saved["id"])
+            store.upsert_rule({**saved, "content": "edited"})
+            self.assertEqual(store.state["rules"][0]["content"], "edited")
+            self.assertEqual(store.state["rules"][0]["stats"]["trigger_count"], 1)
+
+    def test_infinite_numbers_do_not_crash_normalization(self):
+        rule = normalize_rule({"keywords": ["x"], "priority": float("inf"), "daily_limit": float("inf"), "cooldown": {"rule_seconds": float("-inf")}})
+        self.assertEqual((rule["priority"], rule["daily_limit"], rule["cooldown"]["rule_seconds"]), (0, 0, 0))
+
+    def test_corrupt_state_file_is_kept_instead_of_overwritten(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "reply_rules.json"
+            path.write_text("{broken", encoding="utf-8")
+            store = ReplyStore(directory)
+            self.assertEqual(store.state["rules"], [])
+            store.save()
+            kept = list(Path(directory).glob("reply_rules.json.corrupt-*"))
+            self.assertEqual(len(kept), 1)
+            self.assertEqual(kept[0].read_text(encoding="utf-8"), "{broken")
+
+    def test_malformed_state_collections_do_not_block_loading(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "reply_rules.json"
+            path.write_text(json.dumps({"rules": 3, "folders": None}), encoding="utf-8")
+            store = ReplyStore(directory)
+            self.assertEqual((store.state["rules"], store.state["folders"]), ([], []))
+
+    def test_blank_text_and_composite_replies_are_rejected(self):
+        holder = object.__new__(webui.ReplyWebUI)
+        for reply_type in ("text", "composite"):
+            rule, error = holder._validate_rule({"name": "x", "keywords": ["x"], "reply_type": reply_type, "content": " \n "})
+            self.assertIsNone(rule, reply_type)
+            self.assertIn("不能为空", error)
+
+    def test_oversized_regex_is_a_validation_error_and_never_raises_at_runtime(self):
+        holder = object.__new__(webui.ReplyWebUI)
+        rule, error = holder._validate_rule({"name": "x", "keywords": ["a{99999999999}"], "match_type": "regex", "content": "ok"})
+        self.assertIsNone(rule)
+        self.assertIn("正则", error)
+        bad = default_rule(keywords=["a{99999999999}"], match_type="regex", content="ok")
+        self.assertEqual(match_keyword(bad, "aaa"), (False, 0, ""))
+
+    def test_time_range_with_spaces_is_normalized_exactly(self):
+        rule = normalize_rule({"keywords": ["x"], "time_range": {"start": " 09:30", "end": "10:45 "}})
+        self.assertEqual(rule["time_range"], {"start": "09:30", "end": "10:45"})
+
+    def test_preview_renders_every_documented_variable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ReplyStore(directory)
+            store.upsert_rule(default_rule(name="v", keywords=["v"], content="{nickname}|{time}|{date}|{random}"))
+            result = ReplyEngine(store).preview("v", user_id="42", context={"sender": "42"})
+            nickname, clock, date, number = result["reply"].split("|")
+            self.assertEqual(nickname, "42")
+            self.assertRegex(clock, r"^\d{2}:\d{2}:\d{2}$")
+            self.assertRegex(date, r"^\d{4}-\d{2}-\d{2}$")
+            self.assertRegex(number, r"^\d+$")
+
+    def test_settings_drop_unknown_keys(self):
+        with tempfile.TemporaryDirectory() as directory:
+            settings = ReplyStore(directory).update_settings({"scope_mode": "whitelist", "evil": {"x": 1}})
+            self.assertNotIn("evil", settings)
+            self.assertEqual(settings["scope_mode"], "whitelist")
+
+    def test_admin_cannot_lock_themselves_out(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ReplyStore(directory)
+            holder = webui_holder(store)
+            request = FakeRequest(username="root")
+            with web_patches(request):
+                request.payload = {"webui_admins": ["someone-else"]}
+                denied = asyncio.run(holder.save_settings())
+                self.assertEqual(denied.status_code, 400)
+                self.assertEqual(store.state["settings"]["webui_admins"], [])
+                request.payload = {"webui_admins": ["root", "someone-else"]}
+                self.assertTrue(asyncio.run(holder.save_settings())["saved"])
+                self.assertEqual(store.state["settings"]["webui_admins"], ["root", "someone-else"])
+
+    def test_import_cannot_replace_webui_admins(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ReplyStore(directory)
+            store.update_settings({"webui_admins": ["root"]})
+            holder = webui_holder(store)
+            request = FakeRequest(username="root")
+            with web_patches(request):
+                request.payload = {"rules": [], "settings": {"webui_admins": ["attacker"], "scope_mode": "whitelist"}}
+                self.assertEqual(asyncio.run(holder.import_rules())["imported"], 0)
+            self.assertEqual(store.state["settings"]["webui_admins"], ["root"])
+            self.assertEqual(store.state["settings"]["scope_mode"], "whitelist")
+
+    def test_routes_use_only_the_plugin_name_prefix(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ReplyStore(directory)
+            routes = []
+            webui.ReplyWebUI(SimpleNamespace(register_web_api=lambda route, *_: routes.append(route)), store, ReplyEngine(store))
+            self.assertIn("/astrbot_plugin_reply/rules/<rule_id>", routes)
+            self.assertTrue(all(route.startswith("/astrbot_plugin_reply/") for route in routes))
+
+    def test_duplicate_returns_the_normalized_copy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ReplyStore(directory)
+            holder = webui_holder(store)
+            source = store.upsert_rule(default_rule(name="长" * 120, keywords=["x"], content="ok"))
+            request = FakeRequest()
+            with web_patches(request):
+                request.payload = {"id": source["id"]}
+                copied = asyncio.run(holder.duplicate_rule())["rule"]
+            self.assertLessEqual(len(copied["name"]), 120)
+            self.assertEqual(copied, next(row for row in store.state["rules"] if row["id"] == copied["id"]))
+
+    def test_overview_reports_the_installed_version(self):
+        with tempfile.TemporaryDirectory() as directory:
+            holder = webui_holder(ReplyStore(directory))
+            with web_patches(FakeRequest()):
+                self.assertEqual(asyncio.run(holder.overview())["version"], "v9.9.9")
 
 
 if __name__ == "__main__":

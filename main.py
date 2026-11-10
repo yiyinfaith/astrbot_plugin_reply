@@ -6,22 +6,13 @@ from typing import Any
 
 from astrbot.api import logger
 from astrbot.api.event.filter import EventMessageType, event_message_type
-from astrbot.api.star import Context, Star, StarTools, register
+from astrbot.api.star import Context, Star, StarTools
 
 from .reply_core.engine import ReplyEngine
 from .reply_core.storage import ReplyStore
-from .reply_core.webui import ReplyWebUI
-
-PLUGIN_NAME = "astrbot_plugin_reply"
+from .reply_core.webui import PLUGIN_NAME, ReplyWebUI
 
 
-@register(
-    name="reply",
-    desc="自定义回复：关键词匹配、动态回复、作用域、冷却和 WebUI 管理。",
-    version="v1.0.0",
-    author="一吟Faith",
-    repo="https://github.com/yiyinfaith/astrbot_plugin_reply",
-)
 class KeywordReplyPlugin(Star):
     """Native AstrBot message handler backed by an atomic JSON rule store."""
 
@@ -40,6 +31,16 @@ class KeywordReplyPlugin(Star):
             self.data_dir,
         )
 
+    @staticmethod
+    async def _lookup_group_name(event) -> str:
+        try:
+            group = await event.get_group()
+        except (AttributeError, LookupError, OSError, RuntimeError, TypeError, ValueError) as exc:
+            # 群名只用于文本替换，平台接口失败时仍要发送回复。
+            logger.warning("查询群名称失败：%s", exc)
+            return ""
+        return str(getattr(group, "group_name", "") or "")
+
     @event_message_type(EventMessageType.ALL)
     async def handle_message(self, event):
         settings = self.store.state.get("settings", {})
@@ -56,6 +57,12 @@ class KeywordReplyPlugin(Star):
             if candidate is None:
                 return
             context = self.engine.event_context(event)
+            if group_id and not context["group_name"] and self.engine.uses_group_name(candidate.rule):
+                context["group_name"] = await self._lookup_group_name(event)
+                # 查询期间其他消息可能已占用冷却或每日次数，需要重新判定。
+                candidate = self.engine.select(message, user_id=user_id, group_id=group_id)
+                if candidate is None:
+                    return
             reply = self.engine.choose_reply(candidate.rule, context)
             chain = self.engine.build_chain(reply)
             if not chain:

@@ -6,12 +6,19 @@ import json
 import os
 import tempfile
 import threading
+import time
 from contextlib import contextmanager
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, cast
 
+from astrbot.api import logger
+
 from .models import DEFAULT_SETTINGS, normalize_folder, normalize_rule, utc_now
+
+
+def _dict_items(value: Any) -> list[dict[str, Any]]:
+    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
 
 
 class ReplyStore:
@@ -35,23 +42,32 @@ class ReplyStore:
             "updated_at": utc_now(),
         }
 
-    @staticmethod
-    def _read(path: Path, fallback: Any) -> Any:
+    def _read_state_file(self) -> Any:
+        """Read saved state, moving an unreadable file aside so a later save cannot erase it."""
         try:
-            with path.open("r", encoding="utf-8-sig") as handle:
+            with self.state_path.open("r", encoding="utf-8-sig") as handle:
                 return json.load(handle)
-        except (OSError, ValueError, TypeError):
-            return fallback
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError, TypeError, RecursionError) as exc:
+            kept = self.state_path.with_name(f"{self.state_path.name}.corrupt-{int(time.time())}")
+            try:
+                os.replace(self.state_path, kept)
+            except OSError:
+                logger.exception("回复数据读取失败，且无法保留原文件：%s", self.state_path)
+            else:
+                logger.error("回复数据读取失败（%s），原文件已保留为 %s", exc, kept)
+            return None
 
     def _load(self) -> dict[str, Any]:
         with self._lock:
-            state = self._read(self.state_path, self._empty_state())
+            state = self._read_state_file()
             if not isinstance(state, dict):
                 state = self._empty_state()
             state.setdefault("schema_version", 2)
-            state["folders"] = [normalize_folder(item) for item in state.get("folders", []) if isinstance(item, dict)]
+            state["folders"] = [normalize_folder(item) for item in _dict_items(state.get("folders"))]
             folder_ids = {folder["id"] for folder in state["folders"]}
-            state["rules"] = [normalize_rule(item) for item in state.get("rules", []) if isinstance(item, dict)]
+            state["rules"] = [normalize_rule(item) for item in _dict_items(state.get("rules"))]
             for rule in state["rules"]:
                 if rule.get("folder_id") not in folder_ids:
                     rule["folder_id"] = ""
@@ -62,7 +78,8 @@ class ReplyStore:
 
     @staticmethod
     def _normalize_settings(settings: dict[str, Any]) -> dict[str, Any]:
-        merged = {**deepcopy(DEFAULT_SETTINGS), **settings}
+        known = {key: value for key, value in settings.items() if key in DEFAULT_SETTINGS}
+        merged = {**deepcopy(DEFAULT_SETTINGS), **known}
         wake = merged.get("require_wake", True)
         merged["require_wake"] = (
             wake if isinstance(wake, bool) else str(wake).strip().casefold() not in {"", "0", "false", "no", "off"}
@@ -107,18 +124,11 @@ class ReplyStore:
             self.state["updated_at"] = utc_now()
             self._atomic_write(self.state_path, self.state)
 
-    def snapshot(self) -> dict[str, Any]:
-        with self._lock:
-            return deepcopy(self.state)
-
     @contextmanager
     def locked(self):
         """Hold the store lock for a compound read/modify/write operation."""
         with self._lock:
             yield self.state
-
-    def replace_rules(self, rules: list[dict[str, Any]], folders: list[dict[str, Any]] | None = None) -> None:
-        self.replace_state(rules, folders=folders, reset_usage=True)
 
     def replace_state(
         self,
@@ -154,6 +164,8 @@ class ReplyStore:
             for index, existing in enumerate(rows):
                 if existing.get("id") == normalized["id"]:
                     normalized["created_at"] = existing.get("created_at", normalized["created_at"])
+                    # The editor holds an old copy; triggers since then must not be lost.
+                    normalized["stats"] = deepcopy(existing.get("stats", normalized["stats"]))
                     rows[index] = normalized
                     break
             else:
@@ -219,10 +231,12 @@ class ReplyStore:
                     return deepcopy(rule)
             return None
 
-    def update_settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+    def update_settings(self, settings: dict[str, Any], *, acting_admin: str | None = None) -> dict[str, Any]:
         with self._lock:
             current = cast(dict[str, Any], self.state.get("settings")) if isinstance(self.state.get("settings"), dict) else {}
             merged = self._normalize_settings({**current, **settings})
+            if acting_admin is not None and merged["webui_admins"] and acting_admin not in merged["webui_admins"]:
+                raise ValueError("WebUI 管理员列表必须包含当前登录账号，否则保存后将无法继续管理。")
             self.state["settings"] = merged
             self.save()
             return deepcopy(merged)

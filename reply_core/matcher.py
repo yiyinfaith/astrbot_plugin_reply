@@ -68,7 +68,7 @@ def match_keyword(
                 return True, len(candidate), candidate
             if rule["match_type"] == "regex" and re.search(keyword, message, re.IGNORECASE if not rule["case_sensitive"] else 0):
                 return True, len(candidate), candidate
-        except re.error:
+        except (re.error, OverflowError, RecursionError):
             continue
     return False, 0, ""
 

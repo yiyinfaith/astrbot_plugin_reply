@@ -73,7 +73,7 @@ def _string_list(value: Any) -> list[str]:
 def _non_negative_int(value: Any, default: int = 0, maximum: int = 365 * 24 * 3600) -> int:
     try:
         number = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
     return max(0, min(number, maximum))
 
@@ -131,7 +131,7 @@ def normalize_rule(raw: Any) -> dict[str, Any]:
     }
     try:
         priority = int(source.get("priority", 0) or 0)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         priority = 0
     base["priority"] = max(-100_000, min(priority, 100_000))
     base["enabled"] = _bool_value(base.get("enabled", True), default=True)
@@ -144,8 +144,8 @@ def normalize_rule(raw: Any) -> dict[str, Any]:
     base["daily_limit"] = _non_negative_int(base.get("daily_limit"), 0, 1_000_000)
     time_range = cast(dict[str, Any], base.get("time_range")) if isinstance(base.get("time_range"), dict) else {}
     base["time_range"] = {
-        "start": str(time_range.get("start") or "")[:5],
-        "end": str(time_range.get("end") or "")[:5],
+        "start": str(time_range.get("start") or "").strip()[:5],
+        "end": str(time_range.get("end") or "").strip()[:5],
     }
     stats = cast(dict[str, Any], base.get("stats")) if isinstance(base.get("stats"), dict) else {}
     base["stats"] = {

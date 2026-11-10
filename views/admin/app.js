@@ -18,8 +18,18 @@ function notify(message, error = false) {
   if (state.noticeTimer) clearTimeout(state.noticeTimer);
   state.notice = error ? '' : message;
   state.error = error ? message : '';
-  render();
-  state.noticeTimer = setTimeout(() => { state.notice = ''; state.error = ''; state.noticeTimer = null; render(); }, 4500);
+  renderNotices();
+  state.noticeTimer = setTimeout(() => { state.notice = ''; state.error = ''; state.noticeTimer = null; renderNotices(); }, 4500);
+}
+
+function noticesHtml() {
+  return `${state.error ? `<div class="notice error" role="alert">${esc(state.error)}</div>` : ''}${state.notice ? `<div class="notice success" role="status">${esc(state.notice)}</div>` : ''}`;
+}
+
+// Notices are patched in place so a message never rebuilds a form the user is typing in.
+function renderNotices() {
+  const box = document.getElementById('notices');
+  if (box) box.innerHTML = noticesHtml();
 }
 
 function nav() {
@@ -28,7 +38,7 @@ function nav() {
 }
 
 function shell(body, title, subtitle = '') {
-  return `<div class="layout"><aside class="sidebar"><div class="brand"><small>REPLY · ADMIN</small><h1>自定义回复插件</h1><p>关键词回复与消息链</p></div><nav class="nav" aria-label="管理页面">${nav().map(([id, label]) => `<button class="${state.tab === id ? 'active' : ''}" data-nav="${id}">${label}</button>`).join('')}</nav><div class="sidebar-foot">版本 v1.0.0<br>只通过 AstrBot WebUI 管理</div></aside><main class="content"><div class="topbar"><div><h2>${esc(title)}</h2><p>${esc(subtitle)}</p></div><div class="actions"><button class="btn" data-action="refresh">刷新</button></div></div>${state.error ? `<div class="notice error" role="alert">${esc(state.error)}</div>` : ''}${state.notice ? `<div class="notice success" role="status">${esc(state.notice)}</div>` : ''}${body}</main></div>`;
+  return `<div class="layout"><aside class="sidebar"><div class="brand"><small>REPLY · ADMIN</small><h1>自定义回复插件</h1><p>关键词回复与消息链</p></div><nav class="nav" aria-label="管理页面">${nav().map(([id, label]) => `<button class="${state.tab === id ? 'active' : ''}" data-nav="${id}">${label}</button>`).join('')}</nav><div class="sidebar-foot">${state.overview?.version ? `版本 ${esc(state.overview.version)}<br>` : ''}只通过 AstrBot WebUI 管理</div></aside><main class="content"><div class="topbar"><div><h2>${esc(title)}</h2><p>${esc(subtitle)}</p></div><div class="actions"><button class="btn" data-action="refresh">刷新</button></div></div><div id="notices">${noticesHtml()}</div>${body}</main></div>`;
 }
 
 function metric(label, value, detail) {
@@ -36,7 +46,7 @@ function metric(label, value, detail) {
 }
 
 function folderOptions(selected = '', includeAll = false) {
-  const options = includeAll ? '<option value="">全部回复</option><option value="__none__">未分类回复</option>' : '<option value="">未分类</option>';
+  const options = includeAll ? `<option value="">全部回复</option><option value="__none__" ${selected === '__none__' ? 'selected' : ''}>未分类回复</option>` : '<option value="">未分类</option>';
   return options + state.folders.map(folder => `<option value="${esc(folder.id)}" ${selected === folder.id ? 'selected' : ''}>${esc(folder.name)}</option>`).join('');
 }
 
@@ -79,11 +89,11 @@ function formView() {
   const d = state.draft || draftDefaults();
   const components = d.components || [];
   const reply = d.reply_type === 'random' ? `<div class="field full"><span>随机回复内容 <span class="hint">每行一条，发送时随机抽取</span></span><textarea id="random_replies" rows="6">${esc((d.random_replies || []).join('\n'))}</textarea></div>` : d.reply_type === 'media' ? `<div class="field full"><span>多媒体消息组件</span><div id="components">${components.map((item, index) => `<div class="component-row" data-index="${index}"><select data-comp="type"><option value="image" ${item.type === 'image' ? 'selected' : ''}>图片</option><option value="video" ${item.type === 'video' ? 'selected' : ''}>视频</option><option value="record" ${['record', 'voice'].includes(item.type) ? 'selected' : ''}>语音</option><option value="file" ${item.type === 'file' ? 'selected' : ''}>文件</option><option value="at" ${item.type === 'at' ? 'selected' : ''}>At</option></select><input data-comp="value" value="${esc(item.value || item.url || item.file || '')}" placeholder="URL、文件路径或用户 ID"><input data-comp="name" value="${esc(item.name || '')}" placeholder="显示名（可选）"><button class="btn danger remove-component" data-action="remove-component" data-index="${index}">移除</button></div>`).join('')}</div><button class="btn" data-action="add-component">＋ 添加组件</button><p class="hint">媒体资源使用 AstrBot 原生消息链发送；路径或 URL 在触发时由平台适配器处理。</p></div>` : `<div class="field full"><span>回复内容</span><textarea id="content" rows="${d.reply_type === 'composite' ? 8 : 5}" placeholder="支持动态变量，例如：你好，{nickname}！">${esc(d.content)}</textarea><p class="hint">${d.reply_type === 'composite' ? '每行一段文本，按顺序组合发送。' : '支持 {sender} {nickname} {group_id} {group_name} {time} {date} {random}。'}</p></div>`;
-  return shell(`<div class="panel"><div class="form-grid"><div class="field"><span>回复名称</span><input id="name" value="${esc(d.name)}" placeholder="例如：菜单帮助"></div><div class="field"><span>文件夹</span><select id="folder_id">${folderOptions(d.folder_id || '')}</select><span class="hint">可以在回复列表中随时移动或移出文件夹。</span></div><div class="field"><span>关键词 <span class="hint">每行一个，可绑定多个</span></span><textarea id="keywords" rows="3" placeholder="菜单\\n帮助">${esc((d.keywords || []).join('\n'))}</textarea></div><div class="field"><span>匹配方式</span><select id="match_type"><option value="exact" ${d.match_type === 'exact' ? 'selected' : ''}>精确匹配</option><option value="contains" ${d.match_type === 'contains' ? 'selected' : ''}>包含匹配</option><option value="prefix" ${d.match_type === 'prefix' ? 'selected' : ''}>前缀匹配</option><option value="regex" ${d.match_type === 'regex' ? 'selected' : ''}>正则表达式</option></select></div><div class="field"><span>回复类型</span><select id="reply_type"><option value="text" ${d.reply_type === 'text' ? 'selected' : ''}>固定文本</option><option value="random" ${d.reply_type === 'random' ? 'selected' : ''}>随机文本</option><option value="composite" ${d.reply_type === 'composite' ? 'selected' : ''}>多段文本</option><option value="media" ${d.reply_type === 'media' ? 'selected' : ''}>多媒体消息链</option></select></div><div class="field"><span>大小写</span><label class="check"><input id="case_sensitive" type="checkbox" ${d.case_sensitive ? 'checked' : ''}> 大小写敏感</label></div><div class="field"><span>状态</span><label class="check"><input id="enabled" type="checkbox" ${d.enabled ? 'checked' : ''}> 启用回复</label></div>${reply}<div class="field"><span>回复优先级</span><input id="priority" type="number" value="${esc(d.priority)}" min="-100000" max="100000"><span class="hint">数值越大越优先；相同优先级按匹配方式和关键词长度稳定排序。</span></div><div class="field"><span>作用域模式</span><select id="scope_mode"><option value="blacklist" ${d.scope?.mode !== 'whitelist' ? 'selected' : ''}>黑名单（默认）</option><option value="whitelist" ${d.scope?.mode === 'whitelist' ? 'selected' : ''}>白名单</option></select></div><div class="field"><span>群号</span><input id="scope_groups" value="${esc((d.scope?.group_ids || []).join(', '))}" placeholder="多个 ID 用逗号分隔"></div><div class="field"><span>用户 ID</span><input id="scope_users" value="${esc((d.scope?.user_ids || []).join(', '))}" placeholder="多个 ID 用逗号分隔"></div><div class="field"><span>回复冷却（秒）</span><input id="rule_seconds" type="number" min="0" value="${esc(d.cooldown?.rule_seconds || 0)}"></div><div class="field"><span>用户冷却（秒）</span><input id="user_seconds" type="number" min="0" value="${esc(d.cooldown?.user_seconds || 0)}"></div><div class="field"><span>群聊冷却（秒）</span><input id="group_seconds" type="number" min="0" value="${esc(d.cooldown?.group_seconds || 0)}"></div><div class="field"><span>每日触发上限</span><input id="daily_limit" type="number" min="0" value="${esc(d.daily_limit || 0)}"><span class="hint">0 表示不限制。</span></div><div class="field"><span>允许时间段</span><div class="choice-row"><input id="time_start" type="time" value="${esc(d.time_range?.start || '')}\"><input id="time_end" type="time" value="${esc(d.time_range?.end || '')}"></div><span class="hint">留空表示全天；支持跨午夜时间段。</span></div><div class="field full"><div class="panel" style="background:var(--surface-muted);box-shadow:none"><h4>变量说明</h4><p class="hint">{sender} 发送者 ID　{nickname} 昵称　{group_id} 群号　{group_name} 群名称　{time} 当前时间　{date} 当前日期　{random} 随机数</p></div></div></div><div class="panel" style="margin-top:16px;background:var(--surface-muted);box-shadow:none"><h3>回复测试</h3><div class="toolbar"><input id="test_message" class="grow" placeholder="输入模拟消息，例如：菜单"><input id="test_sender" placeholder="发送者 ID"><input id="test_group" placeholder="群号"><button class="btn" data-action="test">预览匹配</button></div><pre id="test_result" class="code"></pre></div><div class="form-actions"><button class="btn" data-nav="rules">取消</button>${d.id ? '<button class="btn danger" data-action="delete-current">删除回复</button>' : ''}<button class="btn primary" data-action="save">保存回复</button></div></div>`, d.id ? '编辑回复' : '创建回复', d.id ? '修改现有回复并立即更新缓存。' : '通过表单创建一条可触发的自定义回复。');
+  return shell(`<div class="panel"><div class="form-grid"><div class="field"><span>回复名称</span><input id="name" value="${esc(d.name)}" placeholder="例如：菜单帮助"></div><div class="field"><span>文件夹</span><select id="folder_id">${folderOptions(d.folder_id || '')}</select><span class="hint">可以在回复列表中随时移动或移出文件夹。</span></div><div class="field"><span>关键词 <span class="hint">每行一个，可绑定多个</span></span><textarea id="keywords" rows="3" placeholder="菜单&#10;帮助">${esc((d.keywords || []).join('\n'))}</textarea></div><div class="field"><span>匹配方式</span><select id="match_type"><option value="exact" ${d.match_type === 'exact' ? 'selected' : ''}>精确匹配</option><option value="contains" ${d.match_type === 'contains' ? 'selected' : ''}>包含匹配</option><option value="prefix" ${d.match_type === 'prefix' ? 'selected' : ''}>前缀匹配</option><option value="regex" ${d.match_type === 'regex' ? 'selected' : ''}>正则表达式</option></select></div><div class="field"><span>回复类型</span><select id="reply_type"><option value="text" ${d.reply_type === 'text' ? 'selected' : ''}>固定文本</option><option value="random" ${d.reply_type === 'random' ? 'selected' : ''}>随机文本</option><option value="composite" ${d.reply_type === 'composite' ? 'selected' : ''}>多段文本</option><option value="media" ${d.reply_type === 'media' ? 'selected' : ''}>多媒体消息链</option></select></div><div class="field"><span>大小写</span><label class="check"><input id="case_sensitive" type="checkbox" ${d.case_sensitive ? 'checked' : ''}> 大小写敏感</label></div><div class="field"><span>状态</span><label class="check"><input id="enabled" type="checkbox" ${d.enabled ? 'checked' : ''}> 启用回复</label></div>${reply}<div class="field"><span>回复优先级</span><input id="priority" type="number" value="${esc(d.priority)}" min="-100000" max="100000"><span class="hint">数值越大越优先；相同优先级按匹配方式和关键词长度稳定排序。</span></div><div class="field"><span>作用域模式</span><select id="scope_mode"><option value="blacklist" ${d.scope?.mode !== 'whitelist' ? 'selected' : ''}>黑名单（默认）</option><option value="whitelist" ${d.scope?.mode === 'whitelist' ? 'selected' : ''}>白名单</option></select></div><div class="field"><span>群号</span><input id="scope_groups" value="${esc((d.scope?.group_ids || []).join(', '))}" placeholder="多个 ID 用逗号分隔"></div><div class="field"><span>用户 ID</span><input id="scope_users" value="${esc((d.scope?.user_ids || []).join(', '))}" placeholder="多个 ID 用逗号分隔"></div><div class="field"><span>回复冷却（秒）</span><input id="rule_seconds" type="number" min="0" value="${esc(d.cooldown?.rule_seconds || 0)}"></div><div class="field"><span>用户冷却（秒）</span><input id="user_seconds" type="number" min="0" value="${esc(d.cooldown?.user_seconds || 0)}"></div><div class="field"><span>群聊冷却（秒）</span><input id="group_seconds" type="number" min="0" value="${esc(d.cooldown?.group_seconds || 0)}"></div><div class="field"><span>每日触发上限</span><input id="daily_limit" type="number" min="0" value="${esc(d.daily_limit || 0)}"><span class="hint">0 表示不限制。</span></div><div class="field"><span>允许时间段</span><div class="choice-row"><input id="time_start" type="time" value="${esc(d.time_range?.start || '')}\"><input id="time_end" type="time" value="${esc(d.time_range?.end || '')}"></div><span class="hint">留空表示全天；支持跨午夜时间段。</span></div><div class="field full"><div class="panel" style="background:var(--surface-muted);box-shadow:none"><h4>变量说明</h4><p class="hint">{sender} 发送者 ID　{nickname} 昵称　{group_id} 群号　{group_name} 群名称　{time} 当前时间　{date} 当前日期　{random} 随机数</p></div></div></div><div class="panel" style="margin-top:16px;background:var(--surface-muted);box-shadow:none"><h3>回复测试</h3><div class="toolbar"><input id="test_message" class="grow" placeholder="输入模拟消息，例如：菜单"><input id="test_sender" placeholder="发送者 ID"><input id="test_group" placeholder="群号"><button class="btn" data-action="test">预览匹配</button></div><pre id="test_result" class="code"></pre></div><div class="form-actions"><button class="btn" data-nav="rules">取消</button>${d.id ? '<button class="btn danger" data-action="delete-current">删除回复</button>' : ''}<button class="btn primary" data-action="save">保存回复</button></div></div>`, d.id ? '编辑回复' : '创建回复', d.id ? '修改现有回复并立即更新缓存。' : '通过表单创建一条可触发的自定义回复。');
 }
 
 function transferView() {
-  return shell(`<section class="grid two"><div class="panel"><h3>导出回复</h3><p>导出全部回复、文件夹和全局设置为 JSON 文件，不包含运行中的临时缓存。</p><button class="btn primary" data-action="export">下载 JSON</button></div><div class="panel"><h3>导入回复</h3><p>导入会替换当前回复和文件夹；执行前会在浏览器中二次确认。请保留导出文件备份。</p><div class="dropzone"><label for="import-file">选择 JSON 文件</label><input id="import-file" type="file" accept="application/json,.json"><p id="import-name" class="hint">尚未选择文件</p></div></div></section>`, '导入 / 导出', '备份回复、文件夹和设置，或在不同 AstrBot 实例间同步。');
+  return shell(`<section class="grid two"><div class="panel"><h3>导出回复</h3><p>导出全部回复、文件夹和全局设置为 JSON 文件，不包含运行中的临时缓存。</p><button class="btn primary" data-action="export">下载 JSON</button></div><div class="panel"><h3>导入回复</h3><p>导入会替换当前回复和文件夹，并覆盖文件中的全局设置（WebUI 管理员列表除外）；执行前会在浏览器中二次确认。请保留导出文件备份。</p><div class="dropzone"><label for="import-file">选择 JSON 文件</label><input id="import-file" type="file" accept="application/json,.json"><p id="import-name" class="hint">尚未选择文件</p></div></div></section>`, '导入 / 导出', '备份回复、文件夹和设置，或在不同 AstrBot 实例间同步。');
 }
 
 function statsView() {
@@ -92,7 +102,7 @@ function statsView() {
 
 function settingsView() {
   const settings = state.settings || {};
-  return shell(`<div class="panel"><div class="form-grid"><div class="field full"><label class="check"><input id="require_wake" type="checkbox" ${settings.require_wake ? 'checked' : ''}> 仅响应 @机器人或唤醒命令（默认）</label><span class="hint">关闭后，所有普通消息都会参与匹配，请谨慎使用。</span></div><div class="field"><span>全局作用域模式</span><select id="global_scope_mode"><option value="blacklist" ${settings.scope_mode !== 'whitelist' ? 'selected' : ''}>黑名单（默认）</option><option value="whitelist" ${settings.scope_mode === 'whitelist' ? 'selected' : ''}>白名单</option></select></div><div class="field"><span>全局群号</span><input id="global_groups" value="${esc((settings.group_ids || []).join(', '))}" placeholder="多个 ID 用逗号分隔"></div><div class="field"><span>全局用户 ID</span><input id="global_users" value="${esc((settings.user_ids || []).join(', '))}" placeholder="多个 ID 用逗号分隔"></div><div class="field"><span>WebUI 管理员账号（可选）</span><input id="webui_admins" value="${esc((settings.webui_admins || []).join(', '))}" placeholder="留空表示所有已登录管理面板账号"><span class="hint">AstrBot 管理面板 JWT 已先完成认证；填写后再按用户名限制。</span></div></div><div class="form-actions"><button class="btn primary" data-action="save-settings">保存全局设置</button></div></div>`, '全局设置', '控制唤醒范围和默认黑白名单。');
+  return shell(`<div class="panel"><div class="form-grid"><div class="field full"><label class="check"><input id="require_wake" type="checkbox" ${settings.require_wake ? 'checked' : ''}> 仅响应 @机器人或唤醒命令（默认）</label><span class="hint">关闭后，所有普通消息都会参与匹配，请谨慎使用。</span></div><div class="field"><span>全局作用域模式</span><select id="global_scope_mode"><option value="blacklist" ${settings.scope_mode !== 'whitelist' ? 'selected' : ''}>黑名单（默认）</option><option value="whitelist" ${settings.scope_mode === 'whitelist' ? 'selected' : ''}>白名单</option></select></div><div class="field"><span>全局群号</span><input id="global_groups" value="${esc((settings.group_ids || []).join(', '))}" placeholder="多个 ID 用逗号分隔"></div><div class="field"><span>全局用户 ID</span><input id="global_users" value="${esc((settings.user_ids || []).join(', '))}" placeholder="多个 ID 用逗号分隔"></div><div class="field"><span>WebUI 管理员账号（可选）</span><input id="webui_admins" value="${esc((settings.webui_admins || []).join(', '))}" placeholder="留空表示所有已登录管理面板账号"><span class="hint">AstrBot 管理面板 JWT 已先完成认证；填写后再按用户名限制，且必须包含当前登录账号。</span></div></div><div class="form-actions"><button class="btn primary" data-action="save-settings">保存全局设置</button></div></div>`, '全局设置', '控制唤醒范围和默认黑白名单。');
 }
 
 function render() {
@@ -116,9 +126,12 @@ function readForm() {
   draft.cooldown = { rule_seconds: Number(document.getElementById('rule_seconds').value || 0), user_seconds: Number(document.getElementById('user_seconds').value || 0), group_seconds: Number(document.getElementById('group_seconds').value || 0) };
   draft.daily_limit = Number(document.getElementById('daily_limit').value || 0);
   draft.time_range = { start: document.getElementById('time_start').value, end: document.getElementById('time_end').value };
-  if (draft.reply_type === 'random') draft.random_replies = document.getElementById('random_replies').value.split(/\r?\n/).filter(Boolean);
-  else if (draft.reply_type !== 'media') draft.content = document.getElementById('content').value;
-  if (draft.reply_type === 'media') draft.components = [...document.querySelectorAll('.component-row')].map(row => ({ type: row.querySelector('[data-comp="type"]').value, value: row.querySelector('[data-comp="value"]').value.trim(), name: row.querySelector('[data-comp="name"]').value.trim() }));
+  // Only the editor for the previously rendered reply type exists in the DOM.
+  const randomInput = document.getElementById('random_replies');
+  const contentInput = document.getElementById('content');
+  if (randomInput) draft.random_replies = randomInput.value.split(/\r?\n/).filter(Boolean);
+  if (contentInput) draft.content = contentInput.value;
+  if (document.getElementById('components')) draft.components = [...document.querySelectorAll('.component-row')].map(row => ({ type: row.querySelector('[data-comp="type"]').value, value: row.querySelector('[data-comp="value"]').value.trim(), name: row.querySelector('[data-comp="name"]').value.trim() }));
   return draft;
 }
 
@@ -136,14 +149,30 @@ async function loadFolders() {
   state.folders = (await apiGet('folders')).rows || [];
 }
 
+async function fetchRules() {
+  return apiGet('rules', { ...state.filters, page: state.page, page_size: state.pageSize });
+}
+
 async function loadRules() {
-  const result = await apiGet('rules', { ...state.filters, page: state.page, page_size: state.pageSize });
+  let result = await fetchRules();
+  const lastPage = Math.max(1, Math.ceil((result.total || 0) / state.pageSize));
+  if (state.page > lastPage) { state.page = lastPage; result = await fetchRules(); }
   state.rules = result.rows || []; state.total = result.total || 0;
+}
+
+function readFilters() {
+  return { search: document.getElementById('search').value.trim(), match_type: document.getElementById('match_type').value, enabled: document.getElementById('enabled').value, group_id: document.getElementById('group_id').value.trim(), folder_id: document.getElementById('folder_filter').value };
+}
+
+async function applyFilters() {
+  state.filters = readFilters(); state.page = 1; await loadRules(); render();
 }
 
 async function switchTab(tab) {
   state.tab = tab;
-  if (tab === 'create' && !state.draft) state.draft = draftDefaults();
+  // Edit and copy open their draft directly, so navigating here always means a new reply.
+  state.draft = tab === 'create' ? draftDefaults() : null;
+  if (tab === 'overview') state.overview = await apiGet('overview');
   if (tab === 'rules') { state.page = 1; await loadRules(); }
   if (tab === 'stats') state.stats = (await apiGet('stats')).rows || [];
   render();
@@ -151,7 +180,7 @@ async function switchTab(tab) {
 
 async function saveReply() {
   const reply = readForm();
-  try { await apiPost('rules/save', reply); state.draft = null; state.tab = 'rules'; await loadRules(); state.overview = await apiGet('overview'); notify('回复已保存。'); }
+  try { await apiPost('rules/save', reply); state.draft = null; state.tab = 'rules'; await loadRules(); state.overview = await apiGet('overview'); render(); notify('回复已保存。'); }
   catch (error) { notify(error.message || String(error), true); }
 }
 
@@ -180,11 +209,12 @@ async function submitFolder() {
   if (!dialog) return;
   if (dialog.mode === 'delete') {
     try { await apiPost('folders/delete', { id: dialog.id, confirm: true }); state.folderDialog = null; state.filters.folder_id = ''; await loadFolders(); await loadRules(); state.overview = await apiGet('overview'); render(); notify('文件夹已删除，回复已移到未分类。'); }
-    catch (error) { notify(error.message || String(error), true); }
+    catch (error) { state.folderDialog = null; render(); notify(error.message || String(error), true); }
     return;
   }
   const name = document.getElementById('folder_name')?.value.trim() || '';
   const description = document.getElementById('folder_description')?.value.trim() || '';
+  dialog.name = name; dialog.description = description;
   if (!name) { dialog.error = '文件夹名称不能为空。'; render(); return; }
   try { await apiPost('folders/save', { id: dialog.id, name, description }); state.folderDialog = null; await loadFolders(); await loadRules(); state.overview = await apiGet('overview'); render(); notify('文件夹已保存。'); }
   catch (error) { dialog.error = error.message || String(error); render(); }
@@ -201,14 +231,14 @@ async function submitConfirm() {
   try {
     if (dialog.kind === 'delete-reply') {
       await apiPost('rules/delete', { id: dialog.id, confirm: true });
-      state.confirmDialog = null; state.draft = null; state.tab = 'rules'; await loadRules(); notify('回复已删除。');
+      state.confirmDialog = null; state.draft = null; state.tab = 'rules'; await loadRules(); render(); notify('回复已删除。');
       return;
     }
     if (dialog.kind === 'import') {
       const result = await apiPost('import', state.pendingImport?.payload || {});
       state.confirmDialog = null; state.pendingImport = null; notify(`已导入 ${result.imported} 条回复。`); await load();
     }
-  } catch (error) { notify(error.message || String(error), true); }
+  } catch (error) { state.confirmDialog = null; state.pendingImport = null; render(); notify(error.message || String(error), true); }
 }
 
 async function deleteFolder() {
@@ -220,8 +250,8 @@ async function action(event) {
   const button = event.target.closest('[data-action]'); if (!button) return;
   const act = button.dataset.action;
   try {
-    if (act === 'refresh') { await load(); return; }
-    if (act === 'apply-filter') { state.filters = { search: document.getElementById('search').value.trim(), match_type: document.getElementById('match_type').value, enabled: document.getElementById('enabled').value, group_id: document.getElementById('group_id').value.trim(), folder_id: document.getElementById('folder_filter').value }; state.page = 1; await loadRules(); render(); return; }
+    if (act === 'refresh') { if (state.tab === 'create') state.draft = readForm(); await load(); return; }
+    if (act === 'apply-filter') { await applyFilters(); return; }
     if (act === 'prev') { state.page--; await loadRules(); render(); return; }
     if (act === 'next') { state.page++; await loadRules(); render(); return; }
     if (act === 'new-folder') { openFolderDialog(); return; }
@@ -234,13 +264,13 @@ async function action(event) {
     if (act === 'edit') { state.draft = await apiGet(`rules/${encodeURIComponent(button.dataset.id)}`); state.tab = 'create'; render(); return; }
     if (act === 'toggle') { const row = state.rules.find(item => item.id === button.dataset.id); await apiPost('rules/toggle', { id: button.dataset.id, enabled: !row.enabled }); await loadRules(); render(); return; }
     if (act === 'copy') { const result = await apiPost('rules/duplicate', { id: button.dataset.id }); state.draft = result.rule; state.tab = 'create'; render(); return; }
-    if (act === 'delete' || act === 'delete-current') { const id = button.dataset.id || state.draft?.id; if (!id) return; openConfirmDialog({ kind: 'delete-reply', id, title: '删除回复', message: '删除后不可恢复，确定继续吗？', confirmLabel: '删除回复' }); return; }
+    if (act === 'delete' || act === 'delete-current') { if (act === 'delete-current') state.draft = readForm(); const id = button.dataset.id || state.draft?.id; if (!id) return; openConfirmDialog({ kind: 'delete-reply', id, title: '删除回复', message: '删除后不可恢复，确定继续吗？', confirmLabel: '删除回复' }); return; }
     if (act === 'save') { await saveReply(); return; }
     if (act === 'test') { await testReply(); return; }
     if (act === 'add-component') { state.draft = readForm(); state.draft.components.push({ type: 'image', value: '', name: '' }); render(); return; }
     if (act === 'remove-component') { state.draft = readForm(); state.draft.components.splice(Number(button.dataset.index), 1); render(); return; }
     if (act === 'export') { const data = await apiGet('export'); const blob = new Blob([json(data)], { type: 'application/json' }); const link = document.createElement('a'); const objectUrl = URL.createObjectURL(blob); link.href = objectUrl; link.download = 'custom-replies.json'; link.style.display = 'none'; document.body.appendChild(link); link.click(); setTimeout(() => { URL.revokeObjectURL(objectUrl); link.remove(); }, 0); notify('回复和文件夹已导出。'); return; }
-    if (act === 'save-settings') { const settings = { require_wake: document.getElementById('require_wake').checked, scope_mode: document.getElementById('global_scope_mode').value, group_ids: document.getElementById('global_groups').value.split(/[,\n]/).map(x => x.trim()).filter(Boolean), user_ids: document.getElementById('global_users').value.split(/[,\n]/).map(x => x.trim()).filter(Boolean), webui_admins: document.getElementById('webui_admins').value.split(/[,\n]/).map(x => x.trim()).filter(Boolean) }; state.settings = (await apiPost('settings/save', settings)).settings; state.overview = await apiGet('overview'); notify('全局设置已保存。'); }
+    if (act === 'save-settings') { const settings = { require_wake: document.getElementById('require_wake').checked, scope_mode: document.getElementById('global_scope_mode').value, group_ids: document.getElementById('global_groups').value.split(/[,\n]/).map(x => x.trim()).filter(Boolean), user_ids: document.getElementById('global_users').value.split(/[,\n]/).map(x => x.trim()).filter(Boolean), webui_admins: document.getElementById('webui_admins').value.split(/[,\n]/).map(x => x.trim()).filter(Boolean) }; state.settings = (await apiPost('settings/save', settings)).settings; state.overview = await apiGet('overview'); render(); notify('全局设置已保存。'); }
   } catch (error) { notify(error.message || String(error), true); }
 }
 
@@ -256,9 +286,11 @@ function bind() {
   if (backdrop) backdrop.addEventListener('click', event => { if (event.target === backdrop) { state.folderDialog = null; render(); } });
   const confirmBackdrop = document.querySelector('[data-confirm-dialog-backdrop]');
   if (confirmBackdrop) confirmBackdrop.addEventListener('click', event => { if (event.target === confirmBackdrop) { state.confirmDialog = null; state.pendingImport = null; render(); } });
-  document.querySelectorAll('[data-folder-rule]').forEach(select => select.addEventListener('change', async event => { try { await apiPost('rules/move', { id: event.target.dataset.folderRule, folder_id: event.target.value }); await loadRules(); notify(event.target.value ? '回复已移入文件夹。' : '回复已移出文件夹。'); } catch (error) { notify(error.message || String(error), true); } }));
+  document.querySelectorAll('[data-folder-rule]').forEach(select => select.addEventListener('change', async event => { try { await apiPost('rules/move', { id: event.target.dataset.folderRule, folder_id: event.target.value }); await loadRules(); render(); notify(event.target.value ? '回复已移入文件夹。' : '回复已移出文件夹。'); } catch (error) { notify(error.message || String(error), true); } }));
+  const folderFilter = document.getElementById('folder_filter');
+  if (folderFilter) folderFilter.addEventListener('change', async () => { try { await applyFilters(); } catch (error) { notify(error.message || String(error), true); } });
   const input = document.getElementById('import-file');
-  if (input) input.addEventListener('change', async () => { const file = input.files[0]; if (!file) return; document.getElementById('import-name').textContent = file.name; try { const payload = JSON.parse(await file.text()); state.pendingImport = { name: file.name, payload }; openConfirmDialog({ kind: 'import', title: '导入回复', message: '导入会替换当前回复和文件夹，确定继续吗？', confirmLabel: '确认导入' }); } catch (error) { notify(`导入文件不是有效 JSON：${error.message || String(error)}`, true); } });
+  if (input) input.addEventListener('change', async () => { const file = input.files[0]; if (!file) return; document.getElementById('import-name').textContent = file.name; try { const payload = JSON.parse(await file.text()); state.pendingImport = { name: file.name, payload }; openConfirmDialog({ kind: 'import', title: '导入回复', message: '导入会替换当前回复和文件夹，并覆盖文件中的全局设置（WebUI 管理员列表除外），确定继续吗？', confirmLabel: '确认导入' }); } catch (error) { notify(`导入文件不是有效 JSON：${error.message || String(error)}`, true); } });
   const type = document.getElementById('reply_type');
   if (type) type.addEventListener('change', () => { state.draft = readForm(); state.draft.reply_type = type.value; render(); });
 }

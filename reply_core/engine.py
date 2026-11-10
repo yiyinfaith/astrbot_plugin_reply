@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import math
 import random
 import re
 from copy import deepcopy
 from datetime import datetime
+from pathlib import PurePosixPath
 from typing import Any
+from urllib.parse import unquote, urlsplit
 
 from .matcher import Candidate, matching_candidates
 from .models import normalize_rule, utc_now
@@ -44,20 +47,28 @@ class ReplyEngine:
         sender_id = str(event.get_sender_id() or "") if hasattr(event, "get_sender_id") else ""
         nickname = str(event.get_sender_name() or "") if hasattr(event, "get_sender_name") else ""
         group_id = str(event.get_group_id() or "") if hasattr(event, "get_group_id") else ""
-        message_obj = getattr(event, "message_obj", None)
-        group_name = str(
-            (message_obj.get("group_name", "") if isinstance(message_obj, dict) else getattr(message_obj, "group_name", "")) or ""
-        )
-        now = datetime.now().astimezone()
+        group = getattr(getattr(event, "message_obj", None), "group", None)
         return {
             "sender": sender_id,
             "nickname": nickname or sender_id,
             "group_id": group_id,
-            "group_name": group_name,
+            "group_name": str(getattr(group, "group_name", "") or ""),
+            **self._generated_variables(),
+        }
+
+    def _generated_variables(self) -> dict[str, str]:
+        now = datetime.now().astimezone()
+        return {
             "time": now.strftime("%H:%M:%S"),
             "date": now.strftime("%Y-%m-%d"),
             "random": str(self.rng.randint(0, 999999)),
         }
+
+    @staticmethod
+    def uses_group_name(rule: dict[str, Any]) -> bool:
+        """Whether a reply needs the group name, which may cost a platform API call."""
+        templates = [rule.get("content"), rule.get("random_replies"), rule.get("components")]
+        return "{group_name}" in json.dumps(templates, ensure_ascii=False)
 
     def _global_scope_allowed(self, group_id: str, user_id: str) -> bool:
         settings = self.store.state.get("settings", {})
@@ -187,9 +198,18 @@ class ReplyEngine:
             break
         if candidate is None:
             return {"matched": False, "reply": "", "rule": None}
-        ctx = {**(context or {}), "sender": user_id, "group_id": group_id}
+        ctx = {"nickname": user_id, **self._generated_variables(), **(context or {}), "sender": user_id, "group_id": group_id}
         reply = self.choose_reply(candidate.rule, ctx)
         return {"matched": True, "rule": deepcopy(candidate.rule), "keyword": candidate.keyword, "reply": reply}
+
+    @staticmethod
+    def _file_name(item: dict[str, Any], value: str, is_url: bool) -> str:
+        """Prefer the configured display name, then the real file name."""
+        name = str(item.get("name") or "").strip()
+        if name:
+            return name
+        path = unquote(urlsplit(value).path) if is_url else value
+        return PurePosixPath(path.replace("\\", "/")).name or "file"
 
     def build_chain(self, reply: Any):
         """Convert a stored reply into AstrBot native components."""
@@ -198,21 +218,27 @@ class ReplyEngine:
         if isinstance(reply, str):
             return [Plain(reply)] if reply else []
         if isinstance(reply, list) and all(isinstance(item, str) for item in reply):
-            return [Plain(item) for item in reply if item]
+            # Adapters join adjacent Plain segments directly, so keep the line breaks.
+            text = "\n".join(item for item in reply if item)
+            return [Plain(text)] if text else []
         components = []
         for item in reply if isinstance(reply, list) else []:
             if not isinstance(item, dict):
                 continue
             kind = str(item.get("type") or "").lower()
-            value = str(item.get("value") or item.get("url") or item.get("file") or "")
+            # A value such as "{group_id}" renders to nothing in private chats.
+            value = str(item.get("value") or item.get("url") or item.get("file") or "").strip()
+            if not value:
+                continue
+            is_url = value.startswith(("http://", "https://"))
             if kind == "image":
-                components.append(Image.fromURL(value) if value.startswith(("http://", "https://")) else Image.fromFileSystem(value))
+                components.append(Image.fromURL(value) if is_url else Image.fromFileSystem(value))
             elif kind == "video":
-                components.append(Video.fromURL(value) if value.startswith(("http://", "https://")) else Video.fromFileSystem(value))
+                components.append(Video.fromURL(value) if is_url else Video.fromFileSystem(value))
             elif kind in {"record", "voice"}:
-                components.append(Record.fromURL(value) if value.startswith(("http://", "https://")) else Record.fromFileSystem(value))
+                components.append(Record.fromURL(value) if is_url else Record.fromFileSystem(value))
             elif kind == "file":
-                components.append(File(name=str(item.get("name") or "file"), file=value if not value.startswith(("http://", "https://")) else "", url=value if value.startswith(("http://", "https://")) else ""))
+                components.append(File(name=self._file_name(item, value, is_url), file="" if is_url else value, url=value if is_url else ""))
             elif kind == "at":
                 components.append(At(name=str(item.get("name") or ""), qq=value))
         return components

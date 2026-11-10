@@ -2,7 +2,7 @@ name: astrbot_plugin_reply
 display_name: 自定义回复插件
 desc: 关键词回复、消息链、作用域、冷却和统计管理。
 short_desc: 通过 AstrBot WebUI 管理关键词回复
-version: v1.0.1 # 插件版本号。格式：v1.1.1 或者 v1.1
+version: v1.0.2 # 插件版本号。格式：v1.1.1 或者 v1.1
 author: 一吟Faith # 作者
 repo: https://github.com/yiyinfaith/astrbot_plugin_reply # 插件的仓库地址
 logo: logo.png
