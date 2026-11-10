@@ -64,11 +64,12 @@ class KeywordReplyPlugin(Star):
                 if candidate is None:
                     return
             reply = self.engine.choose_reply(candidate.rule, context)
-            chain = self.engine.build_chain(reply)
-            if not chain:
+            messages = self.engine.build_messages(reply)
+            if not messages:
                 logger.warning("回复 %s 生成了空消息链，跳过发送", candidate.rule.get("id"))
                 return
             self.engine.record_trigger(candidate.rule["id"], user_id=user_id, group_id=group_id)
-            yield event.chain_result(chain)
+            for chain in messages:
+                yield event.chain_result(chain)
         except (AttributeError, ImportError, IndexError, KeyError, LookupError, OSError, RuntimeError, TypeError, ValueError):
             logger.exception("自定义回复执行失败")

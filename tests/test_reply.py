@@ -256,12 +256,35 @@ class ReplyCoreTests(unittest.TestCase):
         self.assertIsNone(invalid_at)
         self.assertIn("at", error)
 
-    def test_composite_reply_keeps_line_breaks_in_one_message(self):
+    def test_composite_reply_becomes_one_message_per_line(self):
         with tempfile.TemporaryDirectory() as directory:
             engine = ReplyEngine(ReplyStore(directory))
-            rule = default_rule(reply_type="composite", keywords=["x"], content="第一段\n\n第二段")
-            chain = engine.build_chain(engine.choose_reply(rule, {}))
-            self.assertEqual([item.text for item in chain], ["第一段\n第二段"])
+            rule = default_rule(reply_type="composite", keywords=["x"], content="第一段\n\n{group_id}\n第二段")
+            messages = engine.build_messages(engine.choose_reply(rule, {"group_id": ""}))
+            self.assertEqual([[item.text for item in chain] for chain in messages], [["第一段"], ["第二段"]])
+
+    def test_non_composite_replies_stay_a_single_message(self):
+        with tempfile.TemporaryDirectory() as directory:
+            engine = ReplyEngine(ReplyStore(directory))
+            self.assertEqual([len(chain) for chain in engine.build_messages("a\nb")], [1])
+            media = [{"type": "image", "value": "https://example.com/a.png"}, {"type": "at", "value": "1"}]
+            self.assertEqual([len(chain) for chain in engine.build_messages(media)], [2])
+            self.assertEqual(engine.build_messages(""), [])
+
+    def test_handler_sends_each_composite_line_in_order_and_counts_one_trigger(self):
+        with tempfile.TemporaryDirectory() as directory:
+            plugin = self._plugin_with_rule(directory, reply_type="composite", content="一\n二\n三")
+            sent = run_handler(plugin, FakeEvent())
+            self.assertEqual([chain[0].text for chain in sent], ["一", "二", "三"])
+            self.assertEqual(plugin.store.state["rules"][0]["stats"]["trigger_count"], 1)
+
+    def test_composite_reply_is_limited_to_one_hundred_messages(self):
+        holder = object.__new__(webui.ReplyWebUI)
+        accepted, _ = holder._validate_rule({"name": "x", "keywords": ["x"], "reply_type": "composite", "content": "\n".join(["a"] * 100)})
+        self.assertIsNotNone(accepted)
+        rejected, error = holder._validate_rule({"name": "x", "keywords": ["x"], "reply_type": "composite", "content": "\n".join(["a"] * 101)})
+        self.assertIsNone(rejected)
+        self.assertIn("100", error)
 
     def test_group_name_comes_from_message_group(self):
         with tempfile.TemporaryDirectory() as directory:

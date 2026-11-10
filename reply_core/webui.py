@@ -101,6 +101,8 @@ class ReplyWebUI:
             return None, "固定文本回复不能为空"
         if normalized["reply_type"] == "composite" and not normalized["content"].strip():
             return None, "多段文本回复不能为空"
+        if normalized["reply_type"] == "composite" and sum(1 for line in normalized["content"].splitlines() if line.strip()) > 100:
+            return None, "多段文本最多 100 段，每段会单独发送一条消息"
         if normalized["reply_type"] == "random" and not normalized["random_replies"]:
             return None, "随机回复至少需要一条内容"
         if normalized["reply_type"] == "media" and not normalized["components"]:

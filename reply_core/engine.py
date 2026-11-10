@@ -211,16 +211,20 @@ class ReplyEngine:
         path = unquote(urlsplit(value).path) if is_url else value
         return PurePosixPath(path.replace("\\", "/")).name or "file"
 
+    def build_messages(self, reply: Any) -> list[list[Any]]:
+        """Return one component chain per outgoing message."""
+        if isinstance(reply, list) and all(isinstance(item, str) for item in reply):
+            # A line can render to nothing, e.g. "{group_id}" in a private chat.
+            return [chain for part in reply if part.strip() and (chain := self.build_chain(part))]
+        chain = self.build_chain(reply)
+        return [chain] if chain else []
+
     def build_chain(self, reply: Any):
         """Convert a stored reply into AstrBot native components."""
         from astrbot.api.message_components import At, File, Image, Plain, Record, Video
 
         if isinstance(reply, str):
             return [Plain(reply)] if reply else []
-        if isinstance(reply, list) and all(isinstance(item, str) for item in reply):
-            # Adapters join adjacent Plain segments directly, so keep the line breaks.
-            text = "\n".join(item for item in reply if item)
-            return [Plain(text)] if text else []
         components = []
         for item in reply if isinstance(reply, list) else []:
             if not isinstance(item, dict):
