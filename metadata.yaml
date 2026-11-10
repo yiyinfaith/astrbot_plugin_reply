@@ -6,6 +6,7 @@ version: v1.0.3 # 插件版本号。格式：v1.1.1 或者 v1.1
 author: 一吟Faith # 作者
 repo: https://github.com/yiyinfaith/astrbot_plugin_reply # 插件的仓库地址
 logo: logo.png
+category: 工具
 astrbot_version: ">=4.18,<5"
 support_platforms:
   - aiocqhttp
