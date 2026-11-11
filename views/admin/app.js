@@ -476,7 +476,10 @@ function openMenu(select) {
   selectMenu.innerHTML = [...select.options].map((option, index) => `<button type="button" class="select-option ${option.selected ? 'selected' : ''}" role="option" aria-selected="${option.selected}" data-option="${index}">${esc(option.textContent)}</button>`).join('');
   selectMenu.hidden = false;
   placeMenu(trigger);
-  (selectMenu.querySelector('.selected') || selectMenu.firstElementChild)?.focus({ preventScroll: true });
+  const current = selectMenu.querySelector('.selected') || selectMenu.firstElementChild;
+  // Long lists scroll inside the menu; bring the current option into view without moving the page.
+  if (current) selectMenu.scrollTop = Math.max(0, current.offsetTop - (selectMenu.clientHeight - current.offsetHeight) / 2);
+  current?.focus({ preventScroll: true });
 }
 
 function closeMenu(focusTrigger = false) {
