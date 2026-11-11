@@ -52,15 +52,15 @@ function nav() {
 }
 
 function shell(body, title, subtitle = '') {
-  const tabs = nav().map(([id, label, name]) => `<button type="button" class="tab ${state.tab === id ? 'active' : ''}" role="tab" aria-selected="${state.tab === id}" data-nav="${id}">${icon(name)}<span>${label}</span></button>`).join('');
-  const version = state.overview?.version ? `<span class="version">${esc(state.overview.version)}</span>` : '';
-  return `<div class="page">
-    <header class="tabs-bar">
-      <nav class="nav" role="tablist" aria-label="管理页面">${tabs}</nav>
-      <div class="tabs-actions">${version}<button type="button" class="btn text" data-action="refresh">${icon('refresh')}刷新</button></div>
-    </header>
+  const tabs = nav().map(([id, label, name]) => `<button type="button" class="tab ${state.tab === id ? 'active' : ''}" ${state.tab === id ? 'aria-current="page"' : ''} data-nav="${id}">${icon(name)}<span>${label}</span></button>`).join('');
+  const version = state.overview?.version ? `<div class="sidebar-foot">版本 ${esc(state.overview.version)}</div>` : '';
+  return `<div class="layout">
+    <aside class="sidebar">
+      <nav class="nav" aria-label="管理页面">${tabs}</nav>
+      ${version}
+    </aside>
     <main class="content">
-      <div class="page-head"><h2>${esc(title)}</h2><p>${esc(subtitle)}</p></div>
+      <div class="page-head"><div><h2>${esc(title)}</h2><p>${esc(subtitle)}</p></div><button type="button" class="btn text" data-action="refresh">${icon('refresh')}刷新</button></div>
       ${body}
     </main>
   </div>
