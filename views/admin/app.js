@@ -24,6 +24,7 @@ const ICONS = {
   cog: 'M12,8A4,4 0 0,1 16,12A4,4 0 0,1 12,16A4,4 0 0,1 8,12A4,4 0 0,1 12,8M12,10A2,2 0 0,0 10,12A2,2 0 0,0 12,14A2,2 0 0,0 14,12A2,2 0 0,0 12,10M10,22C9.75,22 9.54,21.82 9.5,21.58L9.13,18.93C8.5,18.68 7.96,18.34 7.44,17.94L4.95,18.95C4.73,19.03 4.46,18.95 4.34,18.73L2.34,15.27C2.21,15.05 2.27,14.78 2.46,14.63L4.57,12.97L4.5,12L4.57,11L2.46,9.37C2.27,9.22 2.21,8.95 2.34,8.73L4.34,5.27C4.46,5.05 4.73,4.96 4.95,5.05L7.44,6.05C7.96,5.66 8.5,5.32 9.13,5.07L9.5,2.42C9.54,2.18 9.75,2 10,2H14C14.25,2 14.46,2.18 14.5,2.42L14.87,5.07C15.5,5.32 16.04,5.66 16.56,6.05L19.05,5.05C19.27,4.96 19.54,5.05 19.66,5.27L21.66,8.73C21.79,8.95 21.73,9.22 21.54,9.37L19.43,11L19.5,12L19.43,13L21.54,14.63C21.73,14.78 21.79,15.05 21.66,15.27L19.66,18.73C19.54,18.95 19.27,19.04 19.05,18.95L16.56,17.95C16.04,18.34 15.5,18.68 14.87,18.93L14.5,21.58C14.46,21.82 14.25,22 14,22H10M11.25,4L10.88,6.61C9.68,6.86 8.62,7.5 7.85,8.39L5.44,7.35L4.69,8.65L6.8,10.2C6.4,11.37 6.4,12.64 6.8,13.8L4.68,15.36L5.43,16.66L7.86,15.62C8.63,16.5 9.68,17.14 10.87,17.38L11.24,20H12.76L13.13,17.39C14.32,17.14 15.37,16.5 16.14,15.62L18.57,16.66L19.32,15.36L17.2,13.81C17.6,12.64 17.6,11.37 17.2,10.2L19.31,8.65L18.56,7.35L16.15,8.39C15.38,7.5 14.32,6.86 13.12,6.62L12.75,4H11.25Z',
   refresh: 'M17.65,6.35C16.2,4.9 14.21,4 12,4A8,8 0 0,0 4,12A8,8 0 0,0 12,20C15.73,20 18.84,17.45 19.73,14H17.65C16.83,16.33 14.61,18 12,18A6,6 0 0,1 6,12A6,6 0 0,1 12,6C13.66,6 15.14,6.69 16.22,7.78L13,11H20V4L17.65,6.35Z',
   close: 'M19,6.41L17.59,5L12,10.59L6.41,5L5,6.41L10.59,12L5,17.59L6.41,19L12,13.41L17.59,19L19,17.59L13.41,12L19,6.41Z',
+  menuDown: 'M7,10L12,15L17,10H7Z',
 };
 const icon = name => `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="${ICONS[name]}"/></svg>`;
 const MATCH_LABELS = { exact: '精确', contains: '包含', prefix: '前缀', regex: '正则' };
@@ -218,6 +219,7 @@ function settingsView() {
 }
 
 function render() {
+  closeMenu();
   if (state.loading) { app.innerHTML = '<div class="content"><div class="panel empty">正在连接自定义回复插件…</div></div>'; return; }
   const views = { overview: overviewView, rules: rulesView, create: formView, transfer: transferView, stats: statsView, settings: settingsView };
   app.innerHTML = views[state.tab]() + folderDialogView() + confirmDialogView();
@@ -405,7 +407,122 @@ function bind() {
   if (input) input.addEventListener('change', async () => { const file = input.files[0]; if (!file) return; document.getElementById('import-name').textContent = file.name; try { const payload = JSON.parse(await file.text()); state.pendingImport = { name: file.name, payload }; openConfirmDialog({ kind: 'import', title: '导入回复', message: '导入会替换当前回复和文件夹，并覆盖文件中的全局设置（WebUI 管理员列表除外），确定继续吗？', confirmLabel: '确认导入' }); } catch (error) { notify(`导入文件不是有效 JSON：${error.message || String(error)}`, true); } });
   const type = document.getElementById('reply_type');
   if (type) type.addEventListener('change', () => { state.draft = readForm(); state.draft.reply_type = type.value; render(); });
+  enhanceSelects();
 }
+
+// Native selects stay in the DOM as the source of truth for every handler;
+// this draws a Vuetify-style trigger and menu over them.
+let openSelect = null;
+const selectMenu = document.createElement('div');
+selectMenu.className = 'select-menu';
+selectMenu.setAttribute('role', 'listbox');
+selectMenu.hidden = true;
+document.body.appendChild(selectMenu);
+
+function selectTrigger(select) {
+  return select.parentElement?.querySelector('.select-trigger');
+}
+
+function syncTrigger(select) {
+  const trigger = selectTrigger(select);
+  if (!trigger) return;
+  const value = select.selectedOptions[0]?.textContent || '';
+  trigger.querySelector('.select-value').textContent = value;
+  trigger.setAttribute('aria-label', trigger.dataset.label ? `${trigger.dataset.label}：${value}` : value);
+}
+
+function enhanceSelects() {
+  document.querySelectorAll('#app select:not(.native)').forEach(select => {
+    const wrap = document.createElement('div');
+    wrap.className = `select ${select.className}`.trim();
+    select.className = 'native';
+    select.tabIndex = -1;
+    select.setAttribute('aria-hidden', 'true');
+    const trigger = document.createElement('button');
+    trigger.type = 'button';
+    trigger.className = 'select-trigger';
+    trigger.setAttribute('aria-haspopup', 'listbox');
+    trigger.setAttribute('aria-expanded', 'false');
+    trigger.dataset.label = select.getAttribute('aria-label') || (select.id && document.querySelector(`label[for="${select.id}"]`)?.textContent.trim()) || '';
+    trigger.innerHTML = `<span class="select-value"></span>${icon('menuDown')}`;
+    select.before(wrap);
+    wrap.append(select, trigger);
+    syncTrigger(select);
+    trigger.addEventListener('click', () => (openSelect === select ? closeMenu() : openMenu(select)));
+    trigger.addEventListener('keydown', event => {
+      if (['ArrowDown', 'ArrowUp', 'Enter', ' '].includes(event.key)) { event.preventDefault(); openMenu(select); }
+    });
+    select.addEventListener('focus', () => trigger.focus());
+    select.addEventListener('change', () => syncTrigger(select));
+  });
+}
+
+function placeMenu(trigger) {
+  const rect = trigger.getBoundingClientRect();
+  selectMenu.style.minWidth = `${rect.width}px`;
+  selectMenu.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - selectMenu.offsetWidth - 8))}px`;
+  const below = window.innerHeight - rect.bottom - 8;
+  const height = selectMenu.offsetHeight;
+  selectMenu.style.top = `${height > below && rect.top > below ? Math.max(8, rect.top - height - 4) : rect.bottom + 4}px`;
+}
+
+function openMenu(select) {
+  closeMenu();
+  const trigger = selectTrigger(select);
+  if (!trigger) return;
+  openSelect = select;
+  trigger.setAttribute('aria-expanded', 'true');
+  trigger.classList.add('open');
+  selectMenu.innerHTML = [...select.options].map((option, index) => `<button type="button" class="select-option ${option.selected ? 'selected' : ''}" role="option" aria-selected="${option.selected}" data-option="${index}">${esc(option.textContent)}</button>`).join('');
+  selectMenu.hidden = false;
+  placeMenu(trigger);
+  (selectMenu.querySelector('.selected') || selectMenu.firstElementChild)?.focus({ preventScroll: true });
+}
+
+function closeMenu(focusTrigger = false) {
+  if (!openSelect) return;
+  const trigger = selectTrigger(openSelect);
+  openSelect = null;
+  selectMenu.hidden = true;
+  selectMenu.innerHTML = '';
+  trigger?.setAttribute('aria-expanded', 'false');
+  trigger?.classList.remove('open');
+  if (focusTrigger && trigger?.isConnected) trigger.focus();
+}
+
+function chooseOption(index) {
+  const select = openSelect;
+  if (!select) return;
+  const changed = select.selectedIndex !== index;
+  select.selectedIndex = index;
+  closeMenu(true);
+  if (changed) select.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
+selectMenu.addEventListener('click', event => {
+  const option = event.target.closest('.select-option');
+  if (option) chooseOption(Number(option.dataset.option));
+});
+selectMenu.addEventListener('keydown', event => {
+  const items = [...selectMenu.querySelectorAll('.select-option')];
+  const index = items.indexOf(document.activeElement);
+  const moves = { ArrowDown: Math.min(items.length - 1, index + 1), ArrowUp: Math.max(0, index - 1), Home: 0, End: items.length - 1 };
+  if (event.key in moves) { event.preventDefault(); items[moves[event.key]]?.focus(); }
+  else if (event.key === 'Escape' || event.key === 'Tab') { event.preventDefault(); closeMenu(true); }
+});
+document.addEventListener('mousedown', event => {
+  if (openSelect && !selectMenu.contains(event.target) && !openSelect.parentElement?.contains(event.target)) closeMenu();
+});
+// Like Vuetify's "reposition" strategy: follow the trigger, close once it leaves the viewport.
+function followTrigger() {
+  const trigger = openSelect && selectTrigger(openSelect);
+  if (!trigger) return;
+  const rect = trigger.getBoundingClientRect();
+  if (rect.bottom < 0 || rect.top > window.innerHeight) closeMenu();
+  else placeMenu(trigger);
+}
+document.addEventListener('scroll', event => { if (!selectMenu.contains(event.target)) followTrigger(); }, true);
+window.addEventListener('resize', followTrigger);
 
 (async () => {
   if (!bridge) { state.loading = false; state.error = '请从 AstrBot 插件详情页打开自定义回复插件。'; render(); return; }
