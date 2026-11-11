@@ -11,6 +11,7 @@ from astrbot.api import logger
 from astrbot.api.web import error_response, json_response, request
 
 from .engine import ReplyEngine
+from .matcher import regex_error
 from .models import (
     DEFAULT_SETTINGS,
     MATCH_TYPES,
@@ -111,10 +112,8 @@ class ReplyWebUI:
             for keyword in normalized["keywords"]:
                 if len(keyword) > 2000:
                     return None, "正则表达式长度不能超过 2000 个字符"
-                try:
-                    re.compile(keyword)
-                except (re.error, OverflowError, RecursionError) as exc:
-                    return None, f"正则表达式无效：{exc}"
+                if problem := regex_error(keyword):
+                    return None, f"正则表达式无效：{problem}"
         for component in normalized["components"]:
             kind = component.get("type")
             if not str(component.get("value") or component.get("url") or component.get("file") or "").strip():

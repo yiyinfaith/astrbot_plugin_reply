@@ -3,14 +3,29 @@
 from __future__ import annotations
 
 import re
+import time as clock
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, time
+from functools import lru_cache
 from typing import Any
+
+import regex
+from astrbot.api import logger
 
 from .models import normalize_rule
 
 MATCH_RANK = {"exact": 4, "prefix": 3, "contains": 2, "regex": 1}
+
+# The match loop runs on the event loop, so one search may only hold it briefly.
+REGEX_TIMEOUT_SECONDS = 0.05
+# A pattern that timed out is skipped for a while, so it cannot slow every later message.
+REGEX_SUSPEND_SECONDS = 60.0
+# Counted repeats are expanded while compiling and the timeout does not cover that step.
+REGEX_MAX_EXPANSION = 200_000
+
+_COUNTED_REPEAT = re.compile(r"\{\s*(\d*)\s*(?:,\s*(\d*)\s*)?\}")
+_suspended_until: dict[tuple[str, int], float] = {}
 
 
 def normalize_text(
@@ -28,6 +43,88 @@ def normalize_text(
     else:
         text = text.strip()
     return text if case_sensitive else text.casefold()
+
+
+def _class_end(pattern: str, start: int) -> int:
+    """Return the index just past the character class opening at ``start``."""
+    index = start + 1
+    if pattern[index:index + 1] == "^":
+        index += 1
+    if pattern[index:index + 1] == "]":
+        index += 1
+    while index < len(pattern) and pattern[index] != "]":
+        index += 2 if pattern[index] == "\\" else 1
+    return index + 1
+
+
+def _expansion_cost(pattern: str) -> int:
+    """Estimate the number of nodes a pattern needs once counted repeats are expanded."""
+    totals = [0]
+    last = 0
+    index = 0
+    while index < len(pattern):
+        char = pattern[index]
+        if char == "(":
+            totals.append(0)
+            last = 0
+            index += 1
+        elif char == ")":
+            last = totals.pop() if len(totals) > 1 else 0
+            totals[-1] += last
+            index += 1
+        elif char == "{" and (repeat := _COUNTED_REPEAT.match(pattern, index)):
+            count = max(1, *(int(bound) for bound in repeat.groups(default="") if bound))
+            totals[-1] += last * (count - 1)
+            last *= count
+            index = repeat.end()
+        else:
+            if char == "\\":
+                index += 2
+            elif char == "[":
+                index = _class_end(pattern, index)
+            else:
+                index += 1
+            last = 1
+            totals[-1] += 1
+    return sum(totals)
+
+
+@lru_cache(maxsize=2048)
+def _compile_regex(keyword: str, flags: int) -> tuple[Any, str]:
+    if _expansion_cost(keyword) > REGEX_MAX_EXPANSION:
+        return None, "重复次数过大，请减小 {n} 中的数值"
+    try:
+        return regex.compile(keyword, flags), ""
+    except (regex.error, IndexError, MemoryError, OverflowError, RecursionError, ValueError) as exc:
+        return None, str(exc) or type(exc).__name__
+
+
+def regex_error(keyword: str) -> str:
+    """Return why a pattern cannot be used, or an empty string when it is valid."""
+    return _compile_regex(keyword, 0)[1]
+
+
+def _regex_search(keyword: str, message: str, flags: int) -> bool:
+    key = (keyword, flags)
+    if clock.monotonic() < _suspended_until.get(key, 0.0):
+        return False
+    _suspended_until.pop(key, None)
+    pattern = _compile_regex(keyword, flags)[0]
+    if pattern is None:
+        return False
+    try:
+        return pattern.search(message, timeout=REGEX_TIMEOUT_SECONDS) is not None
+    except TimeoutError:
+        _suspended_until[key] = clock.monotonic() + REGEX_SUSPEND_SECONDS
+        logger.warning(
+            "正则 %r 匹配超过 %d 毫秒，已暂停 %d 秒，请简化这条正则",
+            keyword[:200],
+            REGEX_TIMEOUT_SECONDS * 1000,
+            REGEX_SUSPEND_SECONDS,
+        )
+        return False
+    except (MemoryError, OverflowError, RecursionError):
+        return False
 
 
 def _in_scope(rule: dict[str, Any], group_id: str, user_id: str) -> bool:
@@ -59,17 +156,14 @@ def match_keyword(
         candidate = normalize_text(keyword, case_sensitive=rule["case_sensitive"], unicode_nfkc=unicode_nfkc, collapse_whitespace=collapse_whitespace)
         if not candidate:
             continue
-        try:
-            if rule["match_type"] == "exact" and value == candidate:
-                return True, len(candidate), candidate
-            if rule["match_type"] == "contains" and candidate in value:
-                return True, len(candidate), candidate
-            if rule["match_type"] == "prefix" and value.startswith(candidate):
-                return True, len(candidate), candidate
-            if rule["match_type"] == "regex" and re.search(keyword, message, re.IGNORECASE if not rule["case_sensitive"] else 0):
-                return True, len(candidate), candidate
-        except (re.error, OverflowError, RecursionError):
-            continue
+        if rule["match_type"] == "exact" and value == candidate:
+            return True, len(candidate), candidate
+        if rule["match_type"] == "contains" and candidate in value:
+            return True, len(candidate), candidate
+        if rule["match_type"] == "prefix" and value.startswith(candidate):
+            return True, len(candidate), candidate
+        if rule["match_type"] == "regex" and _regex_search(keyword, message, regex.IGNORECASE if not rule["case_sensitive"] else 0):
+            return True, len(candidate), candidate
     return False, 0, ""
 
 

@@ -6,6 +6,8 @@ import json
 import random
 import sys
 import tempfile
+import threading
+import time
 import types
 import unittest
 from datetime import datetime, timezone
@@ -13,6 +15,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from reply_core import matcher as matcher_module
 from reply_core import webui
 from reply_core.engine import ReplyEngine, render_variables
 from reply_core.matcher import (
@@ -25,6 +28,10 @@ from reply_core.models import default_rule, normalize_rule
 from reply_core.storage import ReplyStore
 
 ROOT = Path(__file__).resolve().parents[1]
+REAL_SCHEDULE_FLUSH = ReplyStore._schedule_flush
+SLOW_PATTERN = r"(x+x+)+y"
+SLOW_MESSAGE = "x" * 2000
+SLOW_KEY = (SLOW_PATTERN, matcher_module.regex.IGNORECASE)
 
 
 def load_plugin_main():
@@ -156,6 +163,7 @@ class ReplyCoreTests(unittest.TestCase):
             first = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
             self.assertIsNotNone(engine.select("ping", user_id="u1", now=first))
             engine.record_trigger(rule["id"], user_id="u1", now=first)
+            store.flush()
             self.assertIsNone(engine.select("ping", user_id="u1", now=datetime(2026, 1, 1, 0, 0, 30, tzinfo=timezone.utc)))
             self.assertIsNotNone(engine.select("ping", user_id="u1", now=datetime(2026, 1, 1, 0, 1, 1, tzinfo=timezone.utc)))
             reloaded = ReplyStore(directory)
@@ -352,6 +360,7 @@ class ReplyCoreTests(unittest.TestCase):
             store = ReplyStore(directory)
             saved = store.upsert_rule(default_rule(name="a", keywords=["a"], content="a"))
             ReplyEngine(store).record_trigger(saved["id"])
+            store.flush()
             store.upsert_rule({**saved, "content": "edited"})
             self.assertEqual(store.state["rules"][0]["content"], "edited")
             self.assertEqual(store.state["rules"][0]["stats"]["trigger_count"], 1)
@@ -392,6 +401,180 @@ class ReplyCoreTests(unittest.TestCase):
         self.assertIn("正则", error)
         bad = default_rule(keywords=["a{99999999999}"], match_type="regex", content="ok")
         self.assertEqual(match_keyword(bad, "aaa"), (False, 0, ""))
+
+    def regex_rule(self, *keywords):
+        matcher_module._suspended_until.clear()
+        self.addCleanup(matcher_module._suspended_until.clear)
+        return default_rule(keywords=list(keywords), match_type="regex", content="ok")
+
+    def test_catastrophic_regex_is_cut_off_and_then_suspended(self):
+        rule = self.regex_rule(SLOW_PATTERN)
+        started = time.perf_counter()
+        self.assertFalse(match_keyword(rule, SLOW_MESSAGE)[0])
+        self.assertLess(time.perf_counter() - started, 1.0)
+        self.assertIn(SLOW_KEY, matcher_module._suspended_until)
+        with patch.object(matcher_module, "_compile_regex", wraps=matcher_module._compile_regex) as compiled:
+            for _ in range(50):
+                self.assertFalse(match_keyword(rule, SLOW_MESSAGE)[0])
+            compiled.assert_not_called()
+
+    def test_suspension_is_per_pattern_and_expires(self):
+        rule = self.regex_rule(SLOW_PATTERN, r"hello")
+        self.assertTrue(match_keyword(rule, SLOW_MESSAGE + " hello")[0], "a slow keyword must not hide the next one")
+        matcher_module._suspended_until[SLOW_KEY] = time.monotonic() - 1
+        fast = default_rule(keywords=[SLOW_PATTERN], match_type="regex", content="ok")
+        self.assertTrue(match_keyword(fast, "xxy")[0])
+        self.assertNotIn(SLOW_KEY, matcher_module._suspended_until)
+
+    def test_regex_engine_matches_the_standard_library_on_common_patterns(self):
+        import re
+
+        samples = ["Hello World", "订单 12345", "2026-11-10 12:30", "a.b@example.com", "ÀÉ straße", "", "x" * 50]
+        patterns = [
+            r"^hello", r"\d{4}-\d{2}-\d{2}", r"(?i)WORLD$", r"[\u4e00-\u9fff]+\s\d+", r"^\w+@\w+\.com$", r"\bstraße\b",
+            r"(?P<y>\d+)-(?P=y)?", r"a|b", r"(?:x{2}){3}", r"^$", r"[]a]", r"[^\W\d]+", r"(?<=订单 )\d+", r"x*?$",
+        ]
+        for pattern in patterns:
+            for flags in (0, re.IGNORECASE):
+                for sample in samples:
+                    self.assertEqual(
+                        bool(matcher_module.regex.search(pattern, sample, flags)),
+                        bool(re.search(pattern, sample, flags)),
+                        (pattern, flags, sample),
+                    )
+
+    def test_regex_with_explosive_compile_is_rejected_quickly(self):
+        holder = object.__new__(webui.ReplyWebUI)
+        for pattern in (r"(x{65535}){65535}", r"((a{1000}){1000}){1000}", r"(?:(?:a{500}b){500}c){500}"):
+            started = time.perf_counter()
+            rule, error = holder._validate_rule({"name": "x", "keywords": [pattern], "match_type": "regex", "content": "ok"})
+            self.assertIsNone(rule, pattern)
+            self.assertIn("重复次数过大", error)
+            self.assertEqual(match_keyword(default_rule(keywords=[pattern], match_type="regex", content="ok"), "aaa"), (False, 0, ""))
+            self.assertLess(time.perf_counter() - started, 0.5, pattern)
+
+    def test_ordinary_counted_regexes_stay_valid(self):
+        holder = object.__new__(webui.ReplyWebUI)
+        for pattern in (
+            r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}",
+            r".{1,100}a.{1,100}b.{1,100}c.{1,100}",
+            r"a{1000}",
+            r"\{99999999\}",
+            r"[{99999999}]",
+            r"(\w{1,20}\s){1,50}",
+        ):
+            rule, error = holder._validate_rule({"name": "x", "keywords": [pattern], "match_type": "regex", "content": "ok"})
+            self.assertIsNotNone(rule, (pattern, error))
+
+    def test_a_burst_of_triggers_is_written_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ReplyStore(directory)
+            engine = ReplyEngine(store)
+            saved = store.upsert_rule(default_rule(keywords=["hi"], content="ok"))
+            with patch.object(ReplyStore, "_atomic_write", wraps=ReplyStore._atomic_write) as write:
+                for _ in range(50):
+                    engine.record_trigger(saved["id"], user_id="u")
+                self.assertEqual(write.call_count, 0)
+                store.flush()
+                store.flush()
+                self.assertEqual(write.call_count, 1)
+            self.assertEqual(ReplyStore(directory).state["rules"][0]["stats"]["trigger_count"], 50)
+
+    def test_timer_writes_queued_triggers(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(ReplyStore, "_schedule_flush", REAL_SCHEDULE_FLUSH), patch("reply_core.storage.FLUSH_DELAY_SECONDS", 0.05):
+            store = ReplyStore(directory)
+            engine = ReplyEngine(store)
+            saved = store.upsert_rule(default_rule(keywords=["hi"], content="ok"))
+            engine.record_trigger(saved["id"])
+            first_timer = store._timer
+            engine.record_trigger(saved["id"])
+            self.assertIs(store._timer, first_timer, "one timer must serve the whole burst")
+            first_timer.join(5)
+            self.assertFalse(store._dirty)
+            self.assertIsNone(store._timer)
+            self.assertEqual(ReplyStore(directory).state["rules"][0]["stats"]["trigger_count"], 2)
+            store.close()
+
+    def test_admin_save_is_immediate_and_carries_queued_triggers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ReplyStore(directory)
+            engine = ReplyEngine(store)
+            saved = store.upsert_rule(default_rule(keywords=["hi"], content="ok"))
+            engine.record_trigger(saved["id"])
+            store.update_settings({"require_wake": False})
+            self.assertFalse(store._dirty)
+            reloaded = ReplyStore(directory).state
+            self.assertEqual(reloaded["rules"][0]["stats"]["trigger_count"], 1)
+            self.assertFalse(reloaded["settings"]["require_wake"])
+
+    def test_older_snapshot_never_overwrites_a_newer_one(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ReplyStore(directory)
+            with store.locked():
+                older = store._snapshot()
+            store.update_settings({"require_wake": False})
+            store._persist(*older)
+            self.assertFalse(ReplyStore(directory).state["settings"]["require_wake"])
+
+    def test_close_saves_queued_triggers_and_stops_later_background_writes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ReplyStore(directory)
+            engine = ReplyEngine(store)
+            saved = store.upsert_rule(default_rule(keywords=["hi"], content="ok"))
+            engine.record_trigger(saved["id"])
+            store.close()
+            store.close()
+            self.assertEqual(ReplyStore(directory).state["rules"][0]["stats"]["trigger_count"], 1)
+            with patch.object(ReplyStore, "_atomic_write") as write:
+                engine.record_trigger(saved["id"])
+                store.flush()
+                write.assert_not_called()
+                store.update_settings({"require_wake": False})
+                self.assertEqual(write.call_count, 1, "an explicit admin save still works")
+
+    def test_failed_write_stays_queued_and_succeeds_on_retry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ReplyStore(directory)
+            engine = ReplyEngine(store)
+            saved = store.upsert_rule(default_rule(keywords=["hi"], content="ok"))
+            engine.record_trigger(saved["id"])
+            with patch.object(ReplyStore, "_atomic_write", side_effect=OSError("disk full")), self.assertRaises(OSError):
+                store.flush()
+            self.assertTrue(store._dirty)
+            store.flush()
+            self.assertEqual(ReplyStore(directory).state["rules"][0]["stats"]["trigger_count"], 1)
+
+    def test_concurrent_saves_do_not_deadlock_or_corrupt_the_file(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(ReplyStore, "_schedule_flush", REAL_SCHEDULE_FLUSH), patch("reply_core.storage.FLUSH_DELAY_SECONDS", 0.001):
+            store = ReplyStore(directory)
+            engine = ReplyEngine(store)
+            saved = store.upsert_rule(default_rule(keywords=["hi"], content="ok"))
+            errors = []
+
+            def run(action):
+                try:
+                    for _ in range(40):
+                        action()
+                except (KeyError, OSError, RuntimeError, TypeError, ValueError) as exc:
+                    errors.append(exc)
+
+            actions = [lambda: engine.record_trigger(saved["id"]), store.save, store.flush, lambda: store.update_settings({"require_wake": True})]
+            threads = [threading.Thread(target=run, args=(action,), daemon=True) for action in actions * 2]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(60)
+            self.assertFalse(any(thread.is_alive() for thread in threads), "store locks deadlocked")
+            self.assertEqual(errors, [])
+            store.close()
+            self.assertEqual(ReplyStore(directory).state["rules"][0]["stats"]["trigger_count"], 80)
+
+    def test_plugin_terminate_saves_queued_triggers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            plugin = self._plugin_with_rule(directory, content="ok")
+            plugin.engine.record_trigger(plugin.store.state["rules"][0]["id"])
+            asyncio.run(plugin.terminate())
+            self.assertEqual(ReplyStore(directory).state["rules"][0]["stats"]["trigger_count"], 1)
 
     def test_time_range_with_spaces_is_normalized_exactly(self):
         rule = normalize_rule({"keywords": ["x"], "time_range": {"start": " 09:30", "end": "10:45 "}})

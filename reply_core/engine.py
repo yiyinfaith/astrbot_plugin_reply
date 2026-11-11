@@ -174,7 +174,7 @@ class ReplyEngine:
                     stats["last_trigger_at"] = utc_now()
                     rule["updated_at"] = utc_now()
                     break
-            self.store.save()
+            self.store.save_later()
 
     def choose_reply(self, rule: dict[str, Any], context: dict[str, Any]) -> Any:
         rule = normalize_rule(rule)

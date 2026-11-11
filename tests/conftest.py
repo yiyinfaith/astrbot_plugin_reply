@@ -9,6 +9,8 @@ from enum import Enum
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -106,3 +108,11 @@ def _install_astrbot_stubs() -> None:
 
 
 _install_astrbot_stubs()
+
+
+@pytest.fixture(autouse=True)
+def _no_background_flush(monkeypatch):
+    """A timer outliving a test would recreate its deleted temporary directory."""
+    from reply_core.storage import ReplyStore
+
+    monkeypatch.setattr(ReplyStore, "_schedule_flush", lambda self, delay: None)

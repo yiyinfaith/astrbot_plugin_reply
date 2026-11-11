@@ -31,6 +31,9 @@ class KeywordReplyPlugin(Star):
             self.data_dir,
         )
 
+    async def terminate(self):
+        self.store.close()
+
     @staticmethod
     async def _lookup_group_name(event) -> str:
         try:

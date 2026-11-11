@@ -16,6 +16,10 @@ from astrbot.api import logger
 
 from .models import DEFAULT_SETTINGS, normalize_folder, normalize_rule, utc_now
 
+# Trigger bookkeeping is written at most this often; admin changes are written at once.
+FLUSH_DELAY_SECONDS = 2.0
+FLUSH_RETRY_SECONDS = 30.0
+
 
 def _dict_items(value: Any) -> list[dict[str, Any]]:
     return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
@@ -29,6 +33,14 @@ class ReplyStore:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.state_path = self.data_dir / "reply_rules.json"
         self._lock = threading.RLock()
+        # Lock order is always _lock, then _write_lock. A background flush writes
+        # holding only _write_lock, so it never blocks message handling.
+        self._write_lock = threading.Lock()
+        self._dirty = False
+        self._closed = False
+        self._timer: threading.Timer | None = None
+        self._generation = 0
+        self._written_generation = 0
         self.state = self._load()
 
     @staticmethod
@@ -103,13 +115,12 @@ class ReplyStore:
         return merged
 
     @staticmethod
-    def _atomic_write(path: Path, payload: Any) -> None:
+    def _atomic_write(path: Path, text: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
         try:
             with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
-                json.dump(payload, handle, ensure_ascii=False, indent=2)
-                handle.write("\n")
+                handle.write(text)
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temp_name, path)
@@ -119,10 +130,76 @@ class ReplyStore:
             except FileNotFoundError:
                 pass
 
+    def _snapshot(self) -> tuple[int, str]:
+        """Serialize the current state. The caller must hold ``_lock``."""
+        self.state["updated_at"] = utc_now()
+        text = json.dumps(self.state, ensure_ascii=False, indent=2) + "\n"
+        self._generation += 1
+        self._dirty = False
+        return self._generation, text
+
+    def _persist(self, generation: int, text: str) -> None:
+        try:
+            with self._write_lock:
+                # A newer snapshot may have reached the disk while this one waited.
+                if generation > self._written_generation:
+                    self._atomic_write(self.state_path, text)
+                    self._written_generation = generation
+        except OSError:
+            with self._lock:
+                self._dirty = True
+                self._schedule_flush(FLUSH_RETRY_SECONDS)
+            raise
+
     def save(self) -> None:
+        """Write the state now, including any queued trigger bookkeeping."""
         with self._lock:
-            self.state["updated_at"] = utc_now()
-            self._atomic_write(self.state_path, self.state)
+            generation, text = self._snapshot()
+            self._persist(generation, text)
+
+    def save_later(self) -> None:
+        """Queue a write so that a burst of triggers reaches the disk once."""
+        with self._lock:
+            if self._closed:
+                # The next plugin instance has already read the file; writing this
+                # older state could overwrite changes made since.
+                return
+            self._dirty = True
+            self._schedule_flush(FLUSH_DELAY_SECONDS)
+
+    def _schedule_flush(self, delay: float) -> None:
+        if self._timer is None and not self._closed:
+            self._timer = threading.Timer(delay, self._flush_on_timer)
+            self._timer.daemon = True
+            self._timer.start()
+
+    def _flush_on_timer(self) -> None:
+        with self._lock:
+            self._timer = None
+        try:
+            self.flush()
+        except OSError:
+            logger.exception("回复统计写入失败，%d 秒后重试", FLUSH_RETRY_SECONDS)
+
+    def flush(self) -> None:
+        """Write queued changes, if any."""
+        with self._lock:
+            if not self._dirty:
+                return
+            generation, text = self._snapshot()
+        self._persist(generation, text)
+
+    def close(self) -> None:
+        """Stop background writes and save what is still queued."""
+        with self._lock:
+            self._closed = True
+            if self._timer is not None:
+                self._timer.cancel()
+                self._timer = None
+        try:
+            self.flush()
+        except OSError:
+            logger.exception("回复统计写入失败，最近的触发记录未能保存")
 
     @contextmanager
     def locked(self):
